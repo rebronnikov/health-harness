@@ -1,0 +1,25 @@
+# Data store — canonical JSONL + rebuildable SQLite projection.
+# If you want a private backup repo that includes data/, use a separate
+# .gitignore override there. Never commit health data to a public remote.
+data/
+inbox/
+reports/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets / local config overrides
+config.local.toml
+.env
