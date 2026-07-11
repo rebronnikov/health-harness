@@ -28,6 +28,9 @@ from health.store import writer
 from health.store.connection import get_conn
 
 PROTEIN_TARGET_G = 150  # illustrative daily protein floor; surfaced in running totals.
+FIBRE_TARGET_G = 28  # illustrative daily fibre floor; surfaced in running totals.
+# NOTE: both *_TARGET_G constants are temporary. They get replaced by the real
+# targets feature (persisted per-user targets + remaining-today math) when it lands.
 
 CATALOG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS food_catalog (
@@ -39,6 +42,8 @@ CREATE TABLE IF NOT EXISTS food_catalog (
   protein_g       REAL NOT NULL,
   carb_g          REAL NOT NULL,
   fat_g           REAL NOT NULL,
+  fibre_g         REAL NOT NULL,
+  notes           TEXT NOT NULL DEFAULT '', -- free-text detail: composition, brand, prep...
   raw             TEXT NOT NULL,
   ingested_at     TEXT NOT NULL,
   schema_version  INTEGER NOT NULL,
@@ -58,6 +63,7 @@ CREATE TABLE IF NOT EXISTS food_log (
   protein_g       REAL NOT NULL,
   carb_g          REAL NOT NULL,
   fat_g           REAL NOT NULL,
+  fibre_g         REAL NOT NULL,
   estimated       INTEGER NOT NULL,   -- 1 if Claude estimated the macros
   catalog_slug    TEXT,               -- catalog entry that resolved it, or NULL
   raw             TEXT NOT NULL,
@@ -74,7 +80,7 @@ _UNIT_ALIASES = {
     "unit": "each", "units": "each", "serving": "each", "servings": "each",
     "pc": "each", "pcs": "each", "piece": "each", "pieces": "each",
 }
-_MACROS = ("kcal", "protein_g", "carb_g", "fat_g")
+_MACROS = ("kcal", "protein_g", "carb_g", "fat_g", "fibre_g")
 
 
 def _slug(name: str) -> str:
@@ -87,7 +93,7 @@ def _norm_unit(unit: str) -> str:
 
 def _lookup_catalog(conn: sqlite3.Connection, slug: str) -> dict | None:
     row = conn.execute(
-        "SELECT slug, name, ref_qty, ref_unit, kcal, protein_g, carb_g, fat_g "
+        "SELECT slug, name, ref_qty, ref_unit, kcal, protein_g, carb_g, fat_g, fibre_g "
         "FROM food_catalog WHERE slug = ?",
         (slug,),
     ).fetchone()
@@ -99,7 +105,8 @@ def _day_totals(conn: sqlite3.Connection, date: str) -> dict:
         "SELECT COALESCE(SUM(kcal),0)      AS kcal, "
         "       COALESCE(SUM(protein_g),0) AS protein_g, "
         "       COALESCE(SUM(carb_g),0)    AS carb_g, "
-        "       COALESCE(SUM(fat_g),0)     AS fat_g "
+        "       COALESCE(SUM(fat_g),0)     AS fat_g, "
+        "       COALESCE(SUM(fibre_g),0)   AS fibre_g "
         "FROM food_log WHERE date = ?",
         (date,),
     ).fetchone()
@@ -109,7 +116,9 @@ def _day_totals(conn: sqlite3.Connection, date: str) -> dict:
         "protein_g": round(row["protein_g"], 1),
         "carb_g": round(row["carb_g"], 1),
         "fat_g": round(row["fat_g"], 1),
+        "fibre_g": round(row["fibre_g"], 1),
         "protein_target_g": PROTEIN_TARGET_G,
+        "fibre_target_g": FIBRE_TARGET_G,
     }
 
 
@@ -131,20 +140,25 @@ def _accumulate(acc: dict, slug: str, name: str, amount: float, unit: str,
         }
 
 
-def _save_catalog(name: str, ref_qty: float, ref_unit: str, macros: dict) -> dict:
+def _save_catalog(name: str, ref_qty: float, ref_unit: str, macros: dict,
+                  notes: str = "") -> dict:
     return writer.record("food_catalog", {
         "slug": _slug(name), "name": name,
         "ref_qty": float(ref_qty), "ref_unit": _norm_unit(ref_unit),
+        "notes": notes,
         **{k: float(macros[k]) for k in _MACROS},
     })
 
 
 # --- executors -------------------------------------------------------------
 
-def save_food(name: str, ref_qty: float, ref_unit: str,
-              kcal: float, protein_g: float, carb_g: float, fat_g: float) -> dict:
+def save_food(name: str, ref_qty: float, ref_unit: str, kcal: float,
+              protein_g: float, carb_g: float, fat_g: float, fibre_g: float = 0.0,
+              notes: str = "") -> dict:
     saved = _save_catalog(name, ref_qty, ref_unit,
-                          {"kcal": kcal, "protein_g": protein_g, "carb_g": carb_g, "fat_g": fat_g})
+                          {"kcal": kcal, "protein_g": protein_g, "carb_g": carb_g,
+                           "fat_g": fat_g, "fibre_g": fibre_g},
+                          notes=notes)
     return {"saved": saved}
 
 
@@ -201,6 +215,7 @@ def propose_food_estimate(date: str, meal: str, items: list[dict]) -> dict:
         "date": date,
         **{k: round(current[k] + sum(r[k] for r in rows), 1) for k in _MACROS},
         "protein_target_g": PROTEIN_TARGET_G,
+        "fibre_target_g": FIBRE_TARGET_G,
     }
     return {"pending": rows, "projected_day_totals": projected, "needs_confirmation": True}
 
@@ -231,16 +246,19 @@ def get_day_totals(date: str) -> dict:
 # --- projections (one idempotent upsert each; used by live ingest AND rebuild_db) ---
 
 def project_catalog(conn: sqlite3.Connection, row: dict) -> None:
+    # Default fields added after some rows were written, so replaying older JSONL
+    # lines (which lack them) stays lossless. Real values in `row` win.
+    row = {"notes": "", **row}
     conn.execute(
         "INSERT INTO food_catalog(slug, name, ref_qty, ref_unit, kcal, protein_g, carb_g, "
-        "  fat_g, raw, ingested_at, schema_version) "
+        "  fat_g, fibre_g, notes, raw, ingested_at, schema_version) "
         "VALUES (:slug, :name, :ref_qty, :ref_unit, :kcal, :protein_g, :carb_g, :fat_g, "
-        "  :raw, :ingested_at, :schema_version) "
+        "  :fibre_g, :notes, :raw, :ingested_at, :schema_version) "
         "ON CONFLICT(slug) DO UPDATE SET "
         "  name=excluded.name, ref_qty=excluded.ref_qty, ref_unit=excluded.ref_unit, "
         "  kcal=excluded.kcal, protein_g=excluded.protein_g, carb_g=excluded.carb_g, "
-        "  fat_g=excluded.fat_g, raw=excluded.raw, ingested_at=excluded.ingested_at, "
-        "  schema_version=excluded.schema_version",
+        "  fat_g=excluded.fat_g, fibre_g=excluded.fibre_g, notes=excluded.notes, "
+        "  raw=excluded.raw, ingested_at=excluded.ingested_at, schema_version=excluded.schema_version",
         row,
     )
 
@@ -248,15 +266,17 @@ def project_catalog(conn: sqlite3.Connection, row: dict) -> None:
 def project_log(conn: sqlite3.Connection, row: dict) -> None:
     conn.execute(
         "INSERT INTO food_log(date, meal, food_slug, food_name, amount, amount_unit, kcal, "
-        "  protein_g, carb_g, fat_g, estimated, catalog_slug, raw, ingested_at, schema_version) "
+        "  protein_g, carb_g, fat_g, fibre_g, estimated, catalog_slug, raw, ingested_at, "
+        "  schema_version) "
         "VALUES (:date, :meal, :food_slug, :food_name, :amount, :amount_unit, :kcal, "
-        "  :protein_g, :carb_g, :fat_g, :estimated, :catalog_slug, :raw, :ingested_at, "
+        "  :protein_g, :carb_g, :fat_g, :fibre_g, :estimated, :catalog_slug, :raw, :ingested_at, "
         "  :schema_version) "
         "ON CONFLICT(date, meal, food_slug) DO UPDATE SET "
         "  food_name=excluded.food_name, amount=excluded.amount, amount_unit=excluded.amount_unit, "
         "  kcal=excluded.kcal, protein_g=excluded.protein_g, carb_g=excluded.carb_g, "
-        "  fat_g=excluded.fat_g, estimated=excluded.estimated, catalog_slug=excluded.catalog_slug, "
-        "  raw=excluded.raw, ingested_at=excluded.ingested_at, schema_version=excluded.schema_version",
+        "  fat_g=excluded.fat_g, fibre_g=excluded.fibre_g, estimated=excluded.estimated, "
+        "  catalog_slug=excluded.catalog_slug, raw=excluded.raw, ingested_at=excluded.ingested_at, "
+        "  schema_version=excluded.schema_version",
         row,
     )
 
@@ -292,8 +312,8 @@ CATALOG_TOOLS = [{
         "Save or update a reusable food in the user's catalog, with macros stated PER a "
         "reference portion (e.g. per 100 g, per 1 each). Use only when the user explicitly "
         "wants to remember a food for reuse (e.g. 'save oats: 380 kcal, 13g protein, 67g carb, "
-        "7g fat per 100g'). This records nothing about what they ate. Pass the user's numbers "
-        "as given — do not do arithmetic."
+        "7g fat, 10g fibre per 100g'). This records nothing about what they ate. Pass the user's "
+        "numbers as given — do not do arithmetic."
     ),
     "input_schema": {
         "type": "object",
@@ -305,8 +325,10 @@ CATALOG_TOOLS = [{
             "protein_g": {"type": "number"},
             "carb_g": {"type": "number"},
             "fat_g": {"type": "number"},
+            "fibre_g": {"type": "number", "description": "Grams of dietary fibre per portion; pass 0 if the label doesn't list it."},
+            "notes": {"type": "string", "description": "Optional free-text detail worth remembering for later analysis: composition (e.g. which nuts in 'mixed nuts'), brand, or prep (e.g. 'in brine, drained'). Omit if none."},
         },
-        "required": ["name", "ref_qty", "ref_unit", "kcal", "protein_g", "carb_g", "fat_g"],
+        "required": ["name", "ref_qty", "ref_unit", "kcal", "protein_g", "carb_g", "fat_g", "fibre_g"],
     },
 }]
 
@@ -345,6 +367,7 @@ LOG_TOOLS = [
                             "protein_g": {"type": "number"},
                             "carb_g": {"type": "number"},
                             "fat_g": {"type": "number"},
+                            "fibre_g": {"type": "number", "description": "Grams of dietary fibre; include with the other macros when the user gave them (0 if not stated)."},
                             "save": {"type": "boolean", "description": "True only if the user asked to remember this food; quantity+unit then become its catalog reference portion."},
                         },
                         "required": ["name", "quantity", "unit"],
@@ -377,8 +400,9 @@ LOG_TOOLS = [
                             "protein_g": {"type": "number"},
                             "carb_g": {"type": "number"},
                             "fat_g": {"type": "number"},
+                            "fibre_g": {"type": "number", "description": "Grams of dietary fibre; estimate it too (0 if negligible)."},
                         },
-                        "required": ["name", "quantity", "unit", "kcal", "protein_g", "carb_g", "fat_g"],
+                        "required": ["name", "quantity", "unit", "kcal", "protein_g", "carb_g", "fat_g", "fibre_g"],
                     },
                 },
             },
@@ -396,8 +420,9 @@ LOG_TOOLS = [
     {
         "name": "get_day_totals",
         "description": (
-            "Return total kcal and macros logged for a day, plus the user's daily protein target. "
-            "Call this after logging food so your reply can include running daily totals."
+            "Return total kcal and macros logged for a day, plus the user's daily protein and "
+            "fibre targets. Call this after logging food so your reply can include running daily "
+            "totals — include kcal, protein, and fibre."
         ),
         "input_schema": {
             "type": "object",
