@@ -30,6 +30,11 @@ INGREDIENTS: list[dict] = [
     # carbs stored as 0.5 (label says "< 0.5g"); fibre counted separately.
     {"name": "chia seeds", "ref_qty": 15, "ref_unit": "g",
      "kcal": 64, "protein_g": 3.8, "carb_g": 0.5, "fat_g": 4.2, "fibre_g": 4.8},
+    # fibre supplement; digestible macros negligible (logged for the fibre).
+    {"name": "psyllium husk", "ref_qty": 8, "ref_unit": "g",
+     "kcal": 0, "protein_g": 0, "carb_g": 0, "fat_g": 0, "fibre_g": 7,
+     "notes": ("standard serving 2 tbsp = 8g; near-pure fibre supplement, "
+               "digestible macros negligible")},
     {"name": "mixed nuts", "ref_qty": 25, "ref_unit": "g",
      "kcal": 165, "protein_g": 4, "carb_g": 1.1, "fat_g": 15.7, "fibre_g": 1.9,
      "notes": "almonds, walnuts, brazil nuts, hazelnuts, cashews"},
@@ -52,6 +57,10 @@ INGREDIENTS: list[dict] = [
     {"name": "creatine", "ref_qty": 1, "ref_unit": "each",
      "kcal": 0, "protein_g": 0, "carb_g": 0, "fat_g": 0, "fibre_g": 0,
      "notes": "creatine monohydrate; no calories or macros"},
+    # "bulk" in the name -> distinct slug so a later whey (other brand) stays separate.
+    {"name": "whey protein", "ref_qty": 32, "ref_unit": "g",
+     "kcal": 122, "protein_g": 23, "carb_g": 5.1, "fat_g": 1.1, "fibre_g": 0.4,
+     "notes": "whey protein; standard serving 32g"},
     {"name": "skyr", "ref_qty": 100, "ref_unit": "g",
      "kcal": 51, "protein_g": 9, "carb_g": 3.4, "fat_g": 0.1, "fibre_g": 0,
      "notes": "skyr yoghurt; typical serving 210g"},
@@ -75,6 +84,16 @@ INGREDIENTS: list[dict] = [
     {"name": "blueberries", "ref_qty": 100, "ref_unit": "g",
      "kcal": 36, "protein_g": 0.7, "carb_g": 7.3, "fat_g": 0, "fibre_g": 1.2,
      "notes": "typical serving 50g"},
+    # per banana = per-100g * 1.2 (1 medium banana ~= 120g peeled).
+    {"name": "banana", "ref_qty": 1, "ref_unit": "each",
+     "kcal": 108, "protein_g": 1.44, "carb_g": 24.4, "fat_g": 0.12, "fibre_g": 0,
+     "notes": ("bananas; 1 banana ~= 120g peeled; label lists "
+               "no fibre; per 100g: 90 kcal, 1.2g protein, 20.3g carb, 0.1g fat")},
+    # per egg = per-100g * 0.5 (1 medium egg ~= 58g whole, ~50g edible).
+    {"name": "eggs", "ref_qty": 1, "ref_unit": "each",
+     "kcal": 71.5, "protein_g": 7.05, "carb_g": 0, "fat_g": 4.8, "fibre_g": 0,
+     "notes": ("free range white eggs; 1 medium egg ~= 58g "
+               "whole (~50g edible); per 100g: 143 kcal, 14.1g protein, 9.6g fat")},
     {"name": "shakshuka", "ref_qty": 100, "ref_unit": "g",
      "kcal": 92, "protein_g": 1.7, "carb_g": 10, "fat_g": 4.7, "fibre_g": 0,
      "notes": "typical serving 170g; label lists no fibre"},

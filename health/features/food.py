@@ -24,13 +24,9 @@ import sqlite3
 from typing import Any
 
 from health.core.contracts import Feature, get_context
+from health.features import targets
 from health.store import writer
 from health.store.connection import get_conn
-
-PROTEIN_TARGET_G = 150  # illustrative daily protein floor; surfaced in running totals.
-FIBRE_TARGET_G = 28  # illustrative daily fibre floor; surfaced in running totals.
-# NOTE: both *_TARGET_G constants are temporary. They get replaced by the real
-# targets feature (persisted per-user targets + remaining-today math) when it lands.
 
 CATALOG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS food_catalog (
@@ -101,6 +97,7 @@ def _lookup_catalog(conn: sqlite3.Connection, slug: str) -> dict | None:
 
 
 def _day_totals(conn: sqlite3.Connection, date: str) -> dict:
+    # Pure consumed sums for a day. Target/remaining framing is added by _status.
     row = conn.execute(
         "SELECT COALESCE(SUM(kcal),0)      AS kcal, "
         "       COALESCE(SUM(protein_g),0) AS protein_g, "
@@ -117,9 +114,29 @@ def _day_totals(conn: sqlite3.Connection, date: str) -> dict:
         "carb_g": round(row["carb_g"], 1),
         "fat_g": round(row["fat_g"], 1),
         "fibre_g": round(row["fibre_g"], 1),
-        "protein_target_g": PROTEIN_TARGET_G,
-        "fibre_target_g": FIBRE_TARGET_G,
     }
+
+
+def _catalog_rows(conn: sqlite3.Connection) -> list[dict]:
+    # Full macros for every saved food — what targets.suggest sizes portions from.
+    rows = conn.execute(
+        "SELECT name, ref_qty, ref_unit, kcal, protein_g, carb_g, fat_g, fibre_g, notes "
+        "FROM food_catalog"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _status(consumed: dict, date: str) -> dict:
+    """Enrich consumed sums with targets + remaining, and — only in the evening, for
+    today — deterministic catalog suggestions to close the day's gaps. The time gate
+    reads the in-flight message timestamp so Claude never reasons about the clock."""
+    out = {**consumed, "targets": targets.TARGETS, "remaining": targets.remaining(consumed)}
+    now = get_context().timestamp
+    if date == now.date().isoformat() and now.hour >= targets.SUGGEST_AFTER_HOUR:
+        suggestions = targets.suggest(out["remaining"], _catalog_rows(get_conn()))
+        if suggestions:
+            out["suggestions"] = suggestions
+    return out
 
 
 def _accumulate(acc: dict, slug: str, name: str, amount: float, unit: str,
@@ -195,7 +212,8 @@ def log_food(date: str, meal: str, items: list[dict]) -> dict:
         writer.record("food_log", {"date": date, "meal": meal, "estimated": 0, **fields})
         for fields in resolved.values()
     ]
-    return {"logged": logged, "unresolved": unresolved, "day_totals": _day_totals(conn, date)}
+    return {"logged": logged, "unresolved": unresolved,
+            "day_totals": _status(_day_totals(conn, date), date)}
 
 
 def propose_food_estimate(date: str, meal: str, items: list[dict]) -> dict:
@@ -214,10 +232,9 @@ def propose_food_estimate(date: str, meal: str, items: list[dict]) -> dict:
     projected = {
         "date": date,
         **{k: round(current[k] + sum(r[k] for r in rows), 1) for k in _MACROS},
-        "protein_target_g": PROTEIN_TARGET_G,
-        "fibre_target_g": FIBRE_TARGET_G,
     }
-    return {"pending": rows, "projected_day_totals": projected, "needs_confirmation": True}
+    return {"pending": rows, "projected_day_totals": _status(projected, date),
+            "needs_confirmation": True}
 
 
 def confirm_pending() -> dict:
@@ -236,11 +253,12 @@ def confirm_pending() -> dict:
         )
         for fields in acc.values()
     ]
-    return {"logged": logged, "day_totals": _day_totals(get_conn(), pend["date"])}
+    return {"logged": logged,
+            "day_totals": _status(_day_totals(get_conn(), pend["date"]), pend["date"])}
 
 
 def get_day_totals(date: str) -> dict:
-    return _day_totals(get_conn(), date)
+    return _status(_day_totals(get_conn(), date), date)
 
 
 # --- projections (one idempotent upsert each; used by live ingest AND rebuild_db) ---
@@ -448,9 +466,11 @@ LOG_TOOLS = [
     {
         "name": "get_day_totals",
         "description": (
-            "Return total kcal and macros logged for a day, plus the user's daily protein and "
-            "fibre targets. Call this after logging food so your reply can include running daily "
-            "totals — include kcal, protein, and fibre."
+            "Return total kcal and macros logged for a day, the user's daily targets (calorie "
+            "ceiling, protein and fibre floors) with how much of each remains, and — in the "
+            "evening — concrete catalog-food `suggestions` to close the day's gaps. Call this "
+            "after logging food (or when the user asks where they're at) so your reply can report "
+            "progress toward all three targets and weave in any suggestions."
         ),
         "input_schema": {
             "type": "object",

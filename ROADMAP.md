@@ -30,15 +30,17 @@ Likely shape: a new `meal_catalog` (slug + component list) mirroring how
 `food_catalog` + `log_food` already compose; a `log_meal(meal_slug, date, overrides)`
 executor that expands to `food_log` rows.
 
-### Targets feature
-Persisted per-user targets (calories / protein / fibre) + deterministic
-"remaining today" math exposed as a query tool. Replaces the hardcoded stopgap
-constants `PROTEIN_TARGET_G = 150` and `FIBRE_TARGET_G = 28` in
-`health/features/food.py`. Read/compute-oriented (`targets.py` stub reserved for it);
-may derive from body weight + goal once measurements exist.
-
 ## Later
 
+- **Targets: bot-settable + weight-derived** — the daily targets (calories / protein /
+  fibre) now live as code constants in `health/features/targets.py`
+  (`TARGETS = {kcal, protein_g, fibre_g}`; calories a ceiling, protein/fibre floors),
+  replacing the old `PROTEIN_TARGET_G`/`FIBRE_TARGET_G` stopgaps in `food.py`.
+  `remaining()` frames consumed-vs-target and `suggest()` proposes catalog foods to
+  close the gaps; `food._status` surfaces both after every log and adds evening
+  suggestions past `SUGGEST_AFTER_HOUR`. Still to do: set targets from a bot message
+  (needs a persisted store instead of constants), derive them from body weight + goal
+  once `measurements` lands, and swap the placeholder numbers for the owner's aligned values.
 - **Weight & body measurements** — `measurements.py` stub. Enables weight-loss
   tracking and target derivation.
 - **Corrections (edit / delete)** — `corrections.py` stub. Edits/deletes recorded as
