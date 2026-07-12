@@ -306,6 +306,30 @@ def pending_system_context(msg) -> str | None:
     )
 
 
+def catalog_system_context(msg) -> str | None:
+    """List the user's saved foods so Claude logs them by their EXACT catalog name
+    (and a compatible unit) instead of estimating. Without this, Claude can't know
+    "cheddar" means the saved "cheddar cheese", and a near-miss name falls straight
+    through to an estimate. Ambiguous mentions should be clarified, not guessed.
+    Rebuilt from the catalog every turn — cheap at personal-catalog scale."""
+    rows = get_conn().execute(
+        "SELECT name, ref_qty, ref_unit FROM food_catalog ORDER BY name"
+    ).fetchall()
+    if not rows:
+        return None
+    lines = "\n".join(f"- {r['name']} — per {r['ref_qty']:g} {r['ref_unit']}" for r in rows)
+    return (
+        "SAVED FOODS (the user's catalog — macros are stored for each). When the user "
+        "mentions one, even loosely (e.g. 'cheddar' -> 'cheddar cheese', 'a slice of "
+        "sourdough' -> 'sourdough', '1 can tuna' -> 'tuna'), log it with log_food using "
+        "its EXACT name below and a unit compatible with how it's measured, so the stored "
+        "macros are used instead of estimating. If a mention could match more than one of "
+        "these (e.g. two salmon fillets), or you're unsure whether a saved food is meant, "
+        "ASK a short clarifying question instead of calling log_food or "
+        "propose_food_estimate.\n" + lines
+    )
+
+
 CATALOG_TOOLS = [{
     "name": "save_food",
     "description": (
@@ -349,7 +373,9 @@ LOG_TOOLS = [
             "Do NOT use this for a food you would have to estimate yourself with no catalog entry "
             "and no user-given macros — use propose_food_estimate instead. Any item that isn't in "
             "the catalog (and had no macros) comes back in `unresolved`; estimate those and propose "
-            "them. Never do arithmetic — pass quantities and any user-given macros verbatim. Set an "
+            "them. Prefer the user's SAVED FOODS: if a mention matches one, pass its exact catalog "
+            "name (and a compatible unit) so its stored macros are used rather than estimated. "
+            "Never do arithmetic — pass quantities and any user-given macros verbatim. Set an "
             "item's `save` to true only if the user asked to remember that food."
         ),
         "input_schema": {
@@ -381,7 +407,9 @@ LOG_TOOLS = [
         "name": "propose_food_estimate",
         "description": (
             "Use when the user ate something NOT in their catalog and did NOT give macros, so you "
-            "must estimate. This SAVES NOTHING — it returns your estimate for you to show the user "
+            "must estimate. Do NOT estimate a food that likely matches one of the user's SAVED "
+            "FOODS — log it by its catalog name via log_food, or ask to clarify if unsure which. "
+            "This SAVES NOTHING — it returns your estimate for you to show the user "
             "and ask them to confirm. Only after they confirm (e.g. 'yes', 'looks right') do you "
             "call confirm_pending to actually log it. Give your best per-item macro estimate."
         ),
@@ -441,6 +469,7 @@ CATALOG_FEATURE = Feature(
     domain="food_catalog",
     dedupe_key=("slug",),
     project=project_catalog,
+    system_context=catalog_system_context,  # surface saved foods so Claude logs by exact name
 )
 
 LOG_FEATURE = Feature(
