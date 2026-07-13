@@ -25,7 +25,7 @@ MAX_TOKENS = 1024
 def handle(msg: NormalizedMessage) -> str:
     token = current_message.set(msg)         # runtime provenance for every executor this turn
     try:
-        system = build_system_prompt(today=msg.timestamp.date())
+        system = build_system_prompt(now=msg.timestamp)
         for fragment in system_context_fragments(msg):   # e.g. a pending estimate awaiting "yes"
             system += "\n" + fragment
         messages = [{"role": "user", "content": msg.text}]

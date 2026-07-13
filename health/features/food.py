@@ -1,7 +1,8 @@
 """Food / macro / calorie tracking — two features in one module.
 
 `food_catalog` holds reusable foods (macros per a reference portion). `food_log`
-holds consumption events, one row per (date, meal, food). A logged row stores the
+holds consumption events, one row per logged eating event (a re-log of the same food
+adds a new row rather than overwriting — see the PRIMARY KEY). A logged row stores the
 *resolved* macros for the amount eaten, so it is self-contained: rebuild_db replays
 stored numbers and never needs the catalog, and editing a catalog entry never
 rewrites history.
@@ -65,7 +66,8 @@ CREATE TABLE IF NOT EXISTS food_log (
   raw             TEXT NOT NULL,
   ingested_at     TEXT NOT NULL,
   schema_version  INTEGER NOT NULL,
-  PRIMARY KEY (date, meal, food_slug) -- dedupe key, enforced by the DB
+  PRIMARY KEY (date, meal, food_slug, ingested_at) -- one row per eating event; a re-log
+                                                   -- (new ingested_at) adds, never overwrites
 );
 """
 
@@ -139,10 +141,29 @@ def _status(consumed: dict, date: str) -> dict:
     return out
 
 
+_NUMBERED_MEALS = ("breakfast", "lunch", "dinner")
+
+
+def _occasion_label(conn: sqlite3.Connection, date: str, meal: str) -> str:
+    """Give each logging occasion a stable label. One log call = one occasion (all its
+    items share the label). Small/standalone items land in a shared `snack` bucket;
+    a main meal (breakfast/lunch/dinner) is numbered per day so a second breakfast reads
+    as `breakfast-2` rather than silently merging into the first. Uniqueness of rows is
+    guaranteed by `ingested_at` in the key regardless — the number is for readability."""
+    base = (meal or "").strip().lower()
+    if base not in _NUMBERED_MEALS:
+        return base or "snack"
+    n = conn.execute(
+        "SELECT COUNT(DISTINCT meal) FROM food_log WHERE date = ? AND (meal = ? OR meal LIKE ?)",
+        (date, base, base + "-%"),
+    ).fetchone()[0]
+    return f"{base}-{n + 1}"
+
+
 def _accumulate(acc: dict, slug: str, name: str, amount: float, unit: str,
                 macros: dict, catalog_slug: str | None) -> None:
-    # Sum items that share a slug so two mentions in one message don't collide on the
-    # (date, meal, food_slug) key and overwrite each other inside the same transaction.
+    # Sum items that share a slug so two mentions of one food in a single message land as
+    # one row (one occasion), instead of two rows a microsecond apart in the same meal.
     if slug in acc:
         e = acc[slug]
         e["amount"] += amount
@@ -208,8 +229,9 @@ def log_food(date: str, meal: str, items: list[dict]) -> dict:
 
         _accumulate(resolved, slug, name, amount, unit, macros, catalog_slug)
 
+    meal_label = _occasion_label(conn, date, meal) if resolved else meal
     logged = [
-        writer.record("food_log", {"date": date, "meal": meal, "estimated": 0, **fields})
+        writer.record("food_log", {"date": date, "meal": meal_label, "estimated": 0, **fields})
         for fields in resolved.values()
     ]
     return {"logged": logged, "unresolved": unresolved,
@@ -245,10 +267,11 @@ def confirm_pending() -> dict:
     for r in pend["rows"]:
         _accumulate(acc, r["food_slug"], r["food_name"], r["amount"], r["amount_unit"],
                     r, r["catalog_slug"])
+    meal_label = _occasion_label(get_conn(), pend["date"], pend["meal"])
     logged = [
         writer.record(
             "food_log",
-            {"date": pend["date"], "meal": pend["meal"], "estimated": 1, **fields},
+            {"date": pend["date"], "meal": meal_label, "estimated": 1, **fields},
             raw=pend["original_raw"],  # the food message, not the "yes"
         )
         for fields in acc.values()
@@ -289,7 +312,7 @@ def project_log(conn: sqlite3.Connection, row: dict) -> None:
         "VALUES (:date, :meal, :food_slug, :food_name, :amount, :amount_unit, :kcal, "
         "  :protein_g, :carb_g, :fat_g, :fibre_g, :estimated, :catalog_slug, :raw, :ingested_at, "
         "  :schema_version) "
-        "ON CONFLICT(date, meal, food_slug) DO UPDATE SET "
+        "ON CONFLICT(date, meal, food_slug, ingested_at) DO UPDATE SET "
         "  food_name=excluded.food_name, amount=excluded.amount, amount_unit=excluded.amount_unit, "
         "  kcal=excluded.kcal, protein_g=excluded.protein_g, carb_g=excluded.carb_g, "
         "  fat_g=excluded.fat_g, fibre_g=excluded.fibre_g, estimated=excluded.estimated, "
@@ -386,8 +409,9 @@ LOG_TOOLS = [
         "description": (
             "Log food the user ate, for foods that are EITHER already in their saved catalog "
             "(pass just name + quantity + unit; the system fills in and scales the macros) OR "
-            "for which the user gave macros explicitly (pass those macros on the item). One row "
-            "per (date, meal, food); re-logging the same food in the same meal overwrites it. "
+            "for which the user gave macros explicitly (pass those macros on the item). Each call "
+            "is a distinct eating event and ADDS to the day — logging the same food again (e.g. a "
+            "second helping) creates a new entry, it does not overwrite the earlier one. "
             "Do NOT use this for a food you would have to estimate yourself with no catalog entry "
             "and no user-given macros — use propose_food_estimate instead. Any item that isn't in "
             "the catalog (and had no macros) comes back in `unresolved`; estimate those and propose "
@@ -400,7 +424,7 @@ LOG_TOOLS = [
             "type": "object",
             "properties": {
                 "date": {"type": "string", "description": "ISO date YYYY-MM-DD. Today if unspecified."},
-                "meal": {"type": "string", "description": "Meal label: breakfast, lunch, dinner, snack, ..."},
+                "meal": {"type": "string", "description": "Base meal label: breakfast, lunch, dinner, or snack. If the user names a meal use it; otherwise infer from the current time of day, but use 'snack' for a small/standalone item (a latte, a coffee, a single piece of fruit). Pass the plain base label only — the system numbers repeats itself (breakfast-1, breakfast-2); never send a numbered label."},
                 "items": {
                     "type": "array",
                     "items": {
@@ -435,7 +459,7 @@ LOG_TOOLS = [
             "type": "object",
             "properties": {
                 "date": {"type": "string", "description": "ISO date YYYY-MM-DD. Today if unspecified."},
-                "meal": {"type": "string", "description": "Meal label: breakfast, lunch, dinner, snack, ..."},
+                "meal": {"type": "string", "description": "Base meal label: breakfast, lunch, dinner, or snack. If the user names a meal use it; otherwise infer from the current time of day, but use 'snack' for a small/standalone item (a latte, a coffee, a single piece of fruit). Pass the plain base label only — the system numbers repeats itself (breakfast-1, breakfast-2); never send a numbered label."},
                 "items": {
                     "type": "array",
                     "items": {
@@ -503,7 +527,7 @@ LOG_FEATURE = Feature(
     },
     schema=LOG_SCHEMA,
     domain="food_log",
-    dedupe_key=("date", "meal", "food_slug"),
+    dedupe_key=("date", "meal", "food_slug", "ingested_at"),
     project=project_log,
     system_context=pending_system_context,
 )
