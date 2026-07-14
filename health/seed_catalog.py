@@ -67,17 +67,19 @@ INGREDIENTS: list[dict] = [
     {"name": "tuna", "ref_qty": 1, "ref_unit": "each",
      "kcal": 109, "protein_g": 24.9, "carb_g": 0, "fat_g": 1, "fibre_g": 0,
      "notes": "canned tuna in spring water; per can"},
-    {"name": "salmon fillet", "ref_qty": 1, "ref_unit": "each",
+    # stored per 100g so weighed portions scale exactly (1 fillet ~= 100g); log actual grams.
+    {"name": "salmon fillet", "ref_qty": 100, "ref_unit": "g",
      "kcal": 195, "protein_g": 23.1, "carb_g": 0, "fat_g": 11.1, "fibre_g": 0,
-     "notes": "1 fillet = 100g; home"},
+     "notes": "home; ~100g per fillet — log actual weight in grams"},
     {"name": "chicken breast", "ref_qty": 100, "ref_unit": "g",
      "kcal": 107, "protein_g": 22.9, "carb_g": 0, "fat_g": 1.6, "fibre_g": 0,
      "notes": "chicken breast fillets"},
     {"name": "cheddar cheese", "ref_qty": 30, "ref_unit": "g",
      "kcal": 125, "protein_g": 7.6, "carb_g": 0, "fat_g": 10.5, "fibre_g": 0},
     {"name": "buckwheat", "ref_qty": 100, "ref_unit": "g",
-     "kcal": 345, "protein_g": 12, "carb_g": 75, "fat_g": 3, "fibre_g": 10.5,
-     "notes": "dry/uncooked (log dry weight)"},
+     "kcal": 92, "protein_g": 3.4, "carb_g": 17, "fat_g": 0.6, "fibre_g": 2.7,
+     "notes": ("cooked; per 100g cooked (log cooked weight); standard cooked "
+               "buckwheat groats. Dry/raw label was 345 kcal/100g")},
     {"name": "chickpeas", "ref_qty": 200, "ref_unit": "g",
      "kcal": 142, "protein_g": 7.9, "carb_g": 17.5, "fat_g": 2.9, "fibre_g": 7.2,
      "notes": "canned, in water"},
@@ -97,6 +99,19 @@ INGREDIENTS: list[dict] = [
     {"name": "shakshuka", "ref_qty": 100, "ref_unit": "g",
      "kcal": 92, "protein_g": 1.7, "carb_g": 10, "fat_g": 4.7, "fibre_g": 0,
      "notes": "typical serving 170g; label lists no fibre"},
+    {"name": "cottage cheese", "ref_qty": 100, "ref_unit": "g",
+     "kcal": 67, "protein_g": 13, "carb_g": 2.5, "fat_g": 0.5, "fibre_g": 0,
+     "notes": "per 100g; label lists no fibre"},
+    # count-based snack; stored per slice (each), 28g/slice recorded in notes.
+    {"name": "protein bar", "ref_qty": 1, "ref_unit": "each",
+     "kcal": 118, "protein_g": 2.2, "carb_g": 9.5, "fat_g": 7.8, "fibre_g": 0,
+     "notes": "1 slice = 28g; label lists no fibre"},
+    {"name": "bulgur wheat with red and white quinoa", "ref_qty": 100, "ref_unit": "g",
+     "kcal": 130, "protein_g": 4.9, "carb_g": 24, "fat_g": 1.2, "fibre_g": 2.1,
+     "notes": "Waitrose; per 100g cooked/as-prepared (log cooked weight)"},
+    {"name": "white, black and red quinoa", "ref_qty": 100, "ref_unit": "g",
+     "kcal": 115, "protein_g": 4.3, "carb_g": 16.4, "fat_g": 2, "fibre_g": 7.1,
+     "notes": "Waitrose; per 100g cooked/as-prepared (log cooked weight)"},
 ]
 
 
