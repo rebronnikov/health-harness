@@ -13,6 +13,7 @@ import json
 from anthropic import Anthropic
 
 from health.config import MODEL
+from health.core import history
 from health.core.contracts import NormalizedMessage, current_message
 from health.core.prompts import build_system_prompt
 from health.core.registry import all_executors, all_tools, system_context_fragments
@@ -28,7 +29,9 @@ def handle(msg: NormalizedMessage) -> str:
         system = build_system_prompt(now=msg.timestamp)
         for fragment in system_context_fragments(msg):   # e.g. a pending estimate awaiting "yes"
             system += "\n" + fragment
-        messages = [{"role": "user", "content": msg.text}]
+        # Prior turns let a follow-up ("make it 90g", "1. log 40g") resolve against what
+        # was actually said. Bounded and in-process — see health/core/history.py.
+        messages = history.load(msg) + [{"role": "user", "content": msg.text}]
         tools, execs = all_tools(), all_executors()
 
         while True:
@@ -43,7 +46,9 @@ def handle(msg: NormalizedMessage) -> str:
 
             tool_uses = [b for b in resp.content if b.type == "tool_use"]
             if not tool_uses:
-                return "".join(b.text for b in resp.content if b.type == "text")
+                reply = "".join(b.text for b in resp.content if b.type == "text")
+                history.save(msg, reply)     # text only — never the tool blocks above
+                return reply
 
             results = []
             for tu in tool_uses:

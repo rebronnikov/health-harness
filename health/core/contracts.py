@@ -51,9 +51,10 @@ class Feature:
     system_context: Callable[[Any], str | None] | None = None
                                              # optional per-message system-prompt fragment, given
                                              # the in-flight NormalizedMessage. Lets a feature
-                                             # surface ephemeral cross-turn state (e.g. a food
-                                             # estimate awaiting the user's "yes") without giving
-                                             # the otherwise-stateless harness a history buffer.
+                                             # surface *structured* cross-turn state (e.g. a food
+                                             # estimate awaiting the user's "yes") precisely,
+                                             # rather than hoping it survives in the harness's
+                                             # bounded chat transcript (core/history.py).
 
     def dedupe_value(self, row: dict) -> tuple:
         return tuple(row[k] for k in self.dedupe_key)

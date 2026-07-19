@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from health import rebuild_db
-from health.core import contracts, registry
+from health.core import contracts, history, registry
 from health.features import food
 from health.store import connection, writer
 
@@ -53,7 +53,7 @@ class _AdvancingClock:
 @pytest.fixture(autouse=True)
 def isolate(monkeypatch, tmp_path):
     """Per-test hermetic sandbox: fresh JSONL dir + fresh SQLite projection, an
-    advancing clock, and a cleared pending-estimate slot."""
+    advancing clock, and cleared in-process state (pending estimate, chat history)."""
     # Redirect every by-value copy of the data paths to this test's tmp dir.
     monkeypatch.setattr(writer, "DATA_DIR", tmp_path)
     monkeypatch.setattr(connection, "DATA_DIR", tmp_path)
@@ -71,9 +71,11 @@ def isolate(monkeypatch, tmp_path):
 
     monkeypatch.setattr(writer, "datetime", _AdvancingClock(DEFAULT_TS))
     food._pending.clear()
+    history.clear()
     yield
     conn.close()
     food._pending.clear()
+    history.clear()
 
 
 @pytest.fixture
@@ -105,6 +107,58 @@ def catalog(ctx):
     food.save_food("banana", 1, "each", 108, 1.44, 24.4, 0.12, 0)
     food.save_food("salmon", 100, "g", 195, 23.1, 0, 11.1, 0)
     return food
+
+
+# --- faking the Anthropic client -------------------------------------------------
+
+class _Block:
+    """Stand-in for one Anthropic content block. The harness only ever reads `.type`,
+    `.text` (text blocks) and `.id`/`.name`/`.input` (tool_use blocks)."""
+
+    def __init__(self, type_, **attrs):
+        self.type = type_
+        for k, v in attrs.items():
+            setattr(self, k, v)
+
+
+def text_block(text):
+    return _Block("text", text=text)
+
+
+def tool_block(name, input, id="tu-1"):
+    return _Block("tool_use", id=id, name=name, input=input)
+
+
+class FakeAnthropic:
+    """Scripted Anthropic client: returns queued responses and records every request.
+    `calls[i]["messages"]` is what makes the harness's context assembly assertable."""
+
+    def __init__(self):
+        self.responses = []
+        self.calls = []
+        self.messages = self
+
+    def script(self, *blocks_per_response):
+        """Queue one response per argument; each argument is a list of content blocks."""
+        self.responses.extend(blocks_per_response)
+
+    def create(self, **kwargs):
+        # Snapshot `messages`: the harness keeps appending to the very list it passed,
+        # so recording it by reference would show post-call mutations.
+        self.calls.append({**kwargs, "messages": list(kwargs["messages"])})
+        if not self.responses:
+            raise AssertionError("FakeAnthropic ran out of scripted responses")
+        return _Block("message", content=self.responses.pop(0))
+
+
+@pytest.fixture
+def fake_client(monkeypatch):
+    """Replace the harness's module-level Anthropic client with a scripted fake."""
+    from health.core import harness
+
+    fake = FakeAnthropic()
+    monkeypatch.setattr(harness, "client", fake)
+    return fake
 
 
 # --- small helpers used across test modules -------------------------------------

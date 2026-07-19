@@ -12,11 +12,14 @@ Claude): Claude maps language -> (food, quantity, unit) and, for unknown foods,
 *estimates* macro values. This module's executors do all deterministic scaling
 (amount / ref_qty) and summation.
 
-Estimates are gated: a food we have to estimate is NOT written on the spot. It is
-stashed in an ephemeral per-chat pending slot and only committed when the user
-confirms (their "yes" lands on a later, context-free turn — the harness stays
-stateless; the tiny bit of state lives here). Catalog hits and user-supplied macros
-auto-commit, as everything else in the system does.
+Estimates are gated: a food whose MACROS we have to estimate is NOT written on the spot.
+It is stashed in an ephemeral per-chat pending slot and only committed when the user
+confirms. Catalog hits and user-supplied macros auto-commit, as everything else does.
+
+Known hole, and it bites harder now the bot is forbidden to ask before logging: the gate
+keys on estimated *macros*, not estimated *amounts*. A catalog hit whose quantity Claude
+guessed ("chickpeas" with no weight) auto-commits, and food_log has no correction path —
+a later "make it 40g" adds a row rather than replacing one. See ROADMAP.md.
 """
 from __future__ import annotations
 
@@ -120,10 +123,11 @@ def _day_totals(conn: sqlite3.Connection, date: str) -> dict:
 
 
 def _catalog_rows(conn: sqlite3.Connection) -> list[dict]:
-    # Full macros for every saved food — what targets.suggest sizes portions from.
+    # Full macros for every saved food, name-ordered — what targets.suggest sizes
+    # portions from, and what the /catalog listing renders.
     rows = conn.execute(
         "SELECT name, ref_qty, ref_unit, kcal, protein_g, carb_g, fat_g, fibre_g, notes "
-        "FROM food_catalog"
+        "FROM food_catalog ORDER BY name"
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -200,10 +204,23 @@ def save_food(name: str, ref_qty: float, ref_unit: str, kcal: float,
     return {"saved": saved}
 
 
+def _unresolved_reason(cat: sqlite3.Row | None, unit: str) -> str:
+    """Why an item couldn't be logged from the catalog, phrased as the next action.
+    Handed straight to Claude: a bare name left it to invent an explanation, and it
+    surfaced the unit mismatch to the user as a question about grams vs 'each'."""
+    if cat is None:
+        return "not in the catalog — estimate its macros and propose them"
+    return (
+        f"the catalog stores this per {cat['ref_qty']:g} {cat['ref_unit']}, but you passed "
+        f"{unit!r} — re-log it with an amount in {cat['ref_unit']}, estimating one from the "
+        "portion the user described if they didn't give a number"
+    )
+
+
 def log_food(date: str, meal: str, items: list[dict]) -> dict:
     conn = get_conn()
     resolved: dict[str, dict] = {}
-    unresolved: list[str] = []
+    unresolved: list[dict] = []
 
     for it in items:
         name = it["name"]
@@ -221,7 +238,7 @@ def log_food(date: str, meal: str, items: list[dict]) -> dict:
         else:
             cat = _lookup_catalog(conn, slug)
             if cat is None or _norm_unit(cat["ref_unit"]) != unit:
-                unresolved.append(name)  # unknown food, or unit family mismatch -> let Claude estimate
+                unresolved.append({"name": name, "reason": _unresolved_reason(cat, unit)})
                 continue
             factor = amount / cat["ref_qty"]
             macros = {k: cat[k] * factor for k in _MACROS}
@@ -284,6 +301,54 @@ def get_day_totals(date: str) -> dict:
     return _status(_day_totals(get_conn(), date), date)
 
 
+# --- catalog listing (backs the deterministic /catalog command; not a Claude tool) ---
+
+def list_catalog() -> list[dict]:
+    # Read-only, name-ordered dump of the whole catalog for the Telegram /catalog
+    # command. Like get_day_totals it reads the projection directly and writes
+    # nothing, so it needs no message context.
+    return _catalog_rows(get_conn())
+
+
+_NAME_W = 15  # name column width; longer names are truncated to keep columns aligned
+_CATALOG_HEADER = ("name", "port", "kcal", "P", "C", "F", "fib")
+
+
+def _fmt_portion(qty: float, unit: str) -> str:
+    return f"{qty:g}{'ea' if unit == 'each' else unit}"
+
+
+def _catalog_line(name: str, port: str, kcal: str, p: str, c: str, f: str, fib: str) -> str:
+    return f"{name:<{_NAME_W}} {port:<5} {kcal:>4} {p:>5} {c:>5} {f:>5} {fib:>4}"
+
+
+def render_catalog_table(rows: list[dict]) -> str:
+    """Plain-text, fixed-width table of the catalog — one row per food, all five
+    macros. Channel-neutral (no markup) so it stays unit-testable; the adapter wraps
+    it in a Telegram <pre> block. kcal is rounded to a whole number, the macros to one
+    decimal, and long names are truncated (…) so the columns line up."""
+    n = len(rows)
+    lines = [
+        f"Food catalog · {n} item{'' if n == 1 else 's'}",
+        "",
+        _catalog_line(*_CATALOG_HEADER),
+    ]
+    for r in rows:
+        name = r["name"]
+        if len(name) > _NAME_W:
+            name = name[:_NAME_W - 1] + "…"
+        lines.append(_catalog_line(
+            name,
+            _fmt_portion(r["ref_qty"], r["ref_unit"]),
+            f"{round(r['kcal'])}",
+            f"{r['protein_g']:.1f}",
+            f"{r['carb_g']:.1f}",
+            f"{r['fat_g']:.1f}",
+            f"{r['fibre_g']:.1f}",
+        ))
+    return "\n".join(lines)
+
+
 # --- projections (one idempotent upsert each; used by live ingest AND rebuild_db) ---
 
 def project_catalog(conn: sqlite3.Connection, row: dict) -> None:
@@ -328,9 +393,11 @@ _pending: dict[Any, dict] = {}
 
 
 def pending_system_context(msg) -> str | None:
-    """Tell Claude this chat has an estimate awaiting confirmation. Without this, a
-    bare "yes" lands on a context-free turn and Claude has no reason to call
-    confirm_pending — the harness keeps no history. This surfaces just that one bit."""
+    """Tell Claude this chat has an estimate awaiting confirmation, and exactly what it
+    holds. The harness now recalls recent turns (core/history.py), but that transcript is
+    lossy for this purpose: it expires, it's capped, and a "yes" may arrive after either
+    bound. This states the pending rows outright so confirm_pending never depends on the
+    proposal still being in the recalled window."""
     pend = _pending.get(msg.reply_handle)
     if not pend:
         return None
@@ -351,7 +418,9 @@ def catalog_system_context(msg) -> str | None:
     """List the user's saved foods so Claude logs them by their EXACT catalog name
     (and a compatible unit) instead of estimating. Without this, Claude can't know
     "cheddar" means the saved "cheddar cheese", and a near-miss name falls straight
-    through to an estimate. Ambiguous mentions should be clarified, not guessed.
+    through to an estimate. An ambiguous mention is resolved by PROPOSING a reading the
+    user can correct, never by asking: a question spends a round-trip and its answer
+    lands on a turn that has no memory of what was asked.
     Rebuilt from the catalog every turn — cheap at personal-catalog scale."""
     rows = get_conn().execute(
         "SELECT name, ref_qty, ref_unit FROM food_catalog ORDER BY name"
@@ -366,8 +435,8 @@ def catalog_system_context(msg) -> str | None:
         "its EXACT name below and a unit compatible with how it's measured, so the stored "
         "macros are used instead of estimating. If a mention could match more than one of "
         "these (e.g. two salmon fillets), or you're unsure whether a saved food is meant, "
-        "ASK a short clarifying question instead of calling log_food or "
-        "propose_food_estimate.\n" + lines
+        "pick the most likely reading and log or propose it — say which one you assumed so "
+        "the user can correct you. Never ask instead of logging.\n" + lines
     )
 
 
@@ -413,9 +482,11 @@ LOG_TOOLS = [
             "is a distinct eating event and ADDS to the day — logging the same food again (e.g. a "
             "second helping) creates a new entry, it does not overwrite the earlier one. "
             "Do NOT use this for a food you would have to estimate yourself with no catalog entry "
-            "and no user-given macros — use propose_food_estimate instead. Any item that isn't in "
-            "the catalog (and had no macros) comes back in `unresolved`; estimate those and propose "
-            "them. Prefer the user's SAVED FOODS: if a mention matches one, pass its exact catalog "
+            "and no user-given macros — use propose_food_estimate instead. Any item that couldn't be "
+            "resolved from the catalog comes back in `unresolved` as {name, reason}; do what the "
+            "reason says (estimate and propose it, or re-log it with a compatible amount) rather "
+            "than asking the user about it. "
+            "Prefer the user's SAVED FOODS: if a mention matches one, pass its exact catalog "
             "name (and a compatible unit) so its stored macros are used rather than estimated. "
             "Never do arithmetic — pass quantities and any user-given macros verbatim. Set an "
             "item's `save` to true only if the user asked to remember that food."

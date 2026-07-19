@@ -37,7 +37,8 @@ def test_each_scales_by_count(ctx, catalog):
 def test_each_food_logged_in_grams_is_unresolved(ctx, catalog):
     ctx()
     out = _log("banana", 100, "g")                             # banana is `each`; grams don't match
-    assert out["unresolved"] == ["banana"]
+    (miss,) = out["unresolved"]
+    assert miss["name"] == "banana"
     assert out["logged"] == []
     assert rows(get_conn(), "SELECT * FROM food_log") == []
 
@@ -45,14 +46,28 @@ def test_each_food_logged_in_grams_is_unresolved(ctx, catalog):
 def test_mass_food_logged_as_each_is_unresolved(ctx, catalog):
     ctx()
     out = _log("salmon", 1, "each")                            # salmon is per-100g; `each` mismatches
-    assert out["unresolved"] == ["salmon"]
+    (miss,) = out["unresolved"]
+    assert miss["name"] == "salmon"
     assert out["logged"] == []
+
+
+def test_unresolved_reason_tells_claude_what_to_do(ctx, catalog):
+    """A bare name left Claude to invent an explanation, and it asked the user about
+    grams-vs-`each` instead of re-logging. The reason must name the catalog's own unit
+    (the fix path) for a mismatch, and say "estimate" for an unknown food."""
+    ctx()
+    (mismatch,) = _log("salmon", 1, "each")["unresolved"]      # catalog has it, wrong unit family
+    assert "100 g" in mismatch["reason"] and "estimat" in mismatch["reason"]
+
+    (unknown,) = _log("pizza", 1, "each")["unresolved"]        # not in the catalog at all
+    assert "not in the catalog" in unknown["reason"]
 
 
 def test_unknown_food_without_macros_is_unresolved(ctx, catalog):
     ctx()
     out = _log("pizza", 1, "each")                             # not in catalog, no macros given
-    assert out["unresolved"] == ["pizza"]
+    (miss,) = out["unresolved"]
+    assert miss["name"] == "pizza"
     assert out["logged"] == []
 
 
