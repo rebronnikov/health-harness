@@ -8,10 +8,10 @@ from __future__ import annotations
 import sqlite3
 
 from health.core.contracts import Feature
-from health.features import food, steps, weight
+from health.features import food, measurements, steps, weight
 
 # Add modules here as features are built (uncomment when implemented):
-# from health.features import exercise, measurements, corrections, review
+# from health.features import exercise, corrections, review
 # NOTE: targets is a compute lib (constants + remaining/suggest math) imported by
 # food, not a routed feature — it declares no tools, so it isn't listed here.
 
@@ -20,8 +20,8 @@ FEATURES: list[Feature] = [
     weight.FEATURE,
     food.CATALOG_FEATURE,
     food.LOG_FEATURE,
+    measurements.FEATURE,
     # exercise.FEATURE,
-    # measurements.FEATURE,
     # corrections.FEATURE,
     # review.FEATURE,      # phase 2
 ]

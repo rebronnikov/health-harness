@@ -8,13 +8,14 @@ import sqlite3
 import pytest
 
 from health import rebuild_db
-from health.features import food, steps, weight
+from health.features import food, measurements, steps, weight
 from health.store.connection import get_conn
 
 DAY = "2026-07-14"
 TABLES = {
     "steps": "date, source",
     "weight": "date, source",
+    "measurements": "date, metric",
     "food_catalog": "slug",
     "food_log": "date, meal, food_slug, ingested_at",
 }
@@ -31,6 +32,9 @@ def _write_a_representative_mix(ctx):
     steps.log_steps(DAY, 9500)                                   # re-log -> overwrites in projection
     ctx(source="telegram", text="weight 72.6")
     weight.log_weight(DAY, 72.6)
+    ctx(source="telegram", text="waist 78.8")
+    measurements.log_measurement(DAY, "waist", 78.8)
+    measurements.log_measurement(DAY, "waist", 78.1)            # re-log -> overwrites in projection
     ctx(source="seed", text="save skyr")
     food.save_food("skyr", 100, "g", 51, 9, 3.4, 0.1, 0, notes="typical serving 210g")
     food.save_food("skyr", 100, "g", 52, 9, 3.4, 0.1, 0)        # re-save -> upsert same slug

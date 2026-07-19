@@ -26,7 +26,7 @@ def test_feature_by_domain_resolves_and_raises():
 
 def test_ingesting_features_are_the_domain_projectors():
     domains = {f.domain for f in registry.ingesting_features()}
-    assert domains == {"steps", "weight", "food_catalog", "food_log"}
+    assert domains == {"steps", "weight", "measurements", "food_catalog", "food_log"}
 
 
 def test_init_schema_is_idempotent():
