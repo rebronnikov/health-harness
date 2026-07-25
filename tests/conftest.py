@@ -139,7 +139,8 @@ class FakeAnthropic:
         self.messages = self
 
     def script(self, *blocks_per_response):
-        """Queue one response per argument; each argument is a list of content blocks."""
+        """Queue one response per argument; each argument is a list of content blocks,
+        or a (blocks, stop_reason) tuple when a non-default stop_reason matters."""
         self.responses.extend(blocks_per_response)
 
     def create(self, **kwargs):
@@ -148,7 +149,9 @@ class FakeAnthropic:
         self.calls.append({**kwargs, "messages": list(kwargs["messages"])})
         if not self.responses:
             raise AssertionError("FakeAnthropic ran out of scripted responses")
-        return _Block("message", content=self.responses.pop(0))
+        scripted = self.responses.pop(0)
+        blocks, stop_reason = scripted if isinstance(scripted, tuple) else (scripted, "end_turn")
+        return _Block("message", content=blocks, stop_reason=stop_reason)
 
 
 @pytest.fixture

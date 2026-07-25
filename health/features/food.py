@@ -14,7 +14,9 @@ Claude): Claude maps language -> (food, quantity, unit) and, for unknown foods,
 
 Estimates are gated: a food whose MACROS we have to estimate is NOT written on the spot.
 It is stashed in an ephemeral per-chat pending slot and only committed when the user
-confirms. Catalog hits and user-supplied macros auto-commit, as everything else does.
+confirms — confirm_pending refuses a confirmation from the same message that proposed
+(the model once chained propose → confirm in one turn and committed an estimate the user
+never saw). Catalog hits and user-supplied macros auto-commit, as everything else does.
 
 Known hole, and it bites harder now the bot is forbidden to ask before logging: the gate
 keys on estimated *macros*, not estimated *amounts*. A catalog hit whose quantity Claude
@@ -230,10 +232,15 @@ def log_food(date: str, meal: str, items: list[dict]) -> dict:
         has_macros = all(it.get(k) is not None for k in _MACROS)
 
         if has_macros:
-            macros = {k: float(it[k]) for k in _MACROS}
+            given = {k: float(it[k]) for k in _MACROS}
+            # Macros may be stated per a reference amount other than the one eaten
+            # ("per 100g ... I ate 63g") — the scaling happens here, never in the model.
+            ref_qty = float(it.get("macros_ref_qty") or amount)
+            factor = amount / ref_qty
+            macros = {k: v * factor for k, v in given.items()} if factor != 1 else given
             catalog_slug = None
             if it.get("save"):
-                _save_catalog(name, amount, unit, macros)  # this portion becomes the reference
+                _save_catalog(name, ref_qty, unit, given)  # the stated reference portion, unscaled
                 catalog_slug = slug
         else:
             cat = _lookup_catalog(conn, slug)
@@ -251,6 +258,13 @@ def log_food(date: str, meal: str, items: list[dict]) -> dict:
         writer.record("food_log", {"date": date, "meal": meal_label, "estimated": 0, **fields})
         for fields in resolved.values()
     ]
+    # A committed log supersedes any pending estimate for the same food (e.g. the user
+    # answered a proposal with real macros) — drop it so a later "yes" can't double-log.
+    pend = _pending.get(get_context().reply_handle)
+    if pend is not None:
+        pend["rows"] = [r for r in pend["rows"] if r["food_slug"] not in resolved]
+        if not pend["rows"]:
+            _pending.pop(get_context().reply_handle, None)
     return {"logged": logged, "unresolved": unresolved,
             "day_totals": _status(_day_totals(conn, date), date)}
 
@@ -266,6 +280,7 @@ def propose_food_estimate(date: str, meal: str, items: list[dict]) -> dict:
     } for it in items]
     _pending[ctx.reply_handle] = {
         "date": date, "meal": meal, "rows": rows, "original_raw": ctx.text or "",
+        "proposed_in": ctx,  # identity of the proposing message; same turn ⇔ same object
     }
     current = _day_totals(get_conn(), date)
     projected = {
@@ -277,9 +292,23 @@ def propose_food_estimate(date: str, meal: str, items: list[dict]) -> dict:
 
 
 def confirm_pending() -> dict:
-    pend = _pending.pop(get_context().reply_handle, None)
+    handle = get_context().reply_handle
+    pend = _pending.get(handle)
     if pend is None:
         return {"error": "Nothing pending to confirm."}
+    if pend["proposed_in"] is get_context():
+        # Confirmation must come from the USER, in a later message. On 2026-07-25 the
+        # model chained propose → confirm inside one turn and committed an estimate the
+        # user never saw (a duplicate 200g beef mince). Refuse — and keep the pending
+        # alive so the user's real "yes" next turn still lands.
+        return {
+            "error": "This estimate was proposed by the CURRENT message — the user has "
+                     "not seen it yet and nothing was logged. Reply with the estimate and "
+                     "ask them to confirm; call confirm_pending only when a LATER message "
+                     "from the user confirms it.",
+            "pending": pend["rows"],
+        }
+    _pending.pop(handle)
     acc: dict[str, dict] = {}
     for r in pend["rows"]:
         _accumulate(acc, r["food_slug"], r["food_name"], r["amount"], r["amount_unit"],
@@ -488,7 +517,10 @@ LOG_TOOLS = [
             "than asking the user about it. "
             "Prefer the user's SAVED FOODS: if a mention matches one, pass its exact catalog "
             "name (and a compatible unit) so its stored macros are used rather than estimated. "
-            "Never do arithmetic — pass quantities and any user-given macros verbatim. Set an "
+            "Never do arithmetic — pass quantities and any user-given macros verbatim. If the "
+            "user stated the macros per a reference amount different from what they ate (e.g. "
+            "'per 100g ... I ate 63g'), also pass that reference amount as `macros_ref_qty` — "
+            "the system scales the macros to the eaten quantity. Set an "
             "item's `save` to true only if the user asked to remember that food."
         ),
         "input_schema": {
@@ -507,7 +539,8 @@ LOG_TOOLS = [
                             "carb_g": {"type": "number"},
                             "fat_g": {"type": "number"},
                             "fibre_g": {"type": "number", "description": "Grams of dietary fibre; include with the other macros when the user gave them (0 if not stated)."},
-                            "save": {"type": "boolean", "description": "True only if the user asked to remember this food; quantity+unit then become its catalog reference portion."},
+                            "macros_ref_qty": {"type": "number", "description": "Only with user-given macros: the reference amount (in `unit`) the macros were stated per, when it differs from `quantity` (e.g. 100 for 'per 100g' when they ate 63g). Omit when the macros describe the eaten amount."},
+                            "save": {"type": "boolean", "description": "True only if the user asked to remember this food; the macro reference portion (macros_ref_qty if given, else quantity) becomes its catalog reference portion."},
                         },
                         "required": ["name", "quantity", "unit"],
                     },
@@ -553,8 +586,10 @@ LOG_TOOLS = [
     {
         "name": "confirm_pending",
         "description": (
-            "Commit the most recently proposed food estimate for this chat. Call this when the user "
-            "confirms a pending estimate. The logged rows are marked as estimated."
+            "Commit the most recently proposed food estimate for this chat. Call this ONLY when a "
+            "LATER user message confirms a pending estimate — never in the same turn that proposed "
+            "it (the proposal must reach the user first; a same-turn call is refused and logs "
+            "nothing). The logged rows are marked as estimated."
         ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },

@@ -70,6 +70,20 @@ def test_stale_thread_does_not_steer_a_fresh_message(fake_client):
     assert fake_client.calls[1]["messages"] == [{"role": "user", "content": "40g"}]
 
 
+def test_refusal_returns_failsafe_not_empty_reply(fake_client):
+    """Safety classifiers can end a turn with stop_reason 'refusal' and no text
+    (HTTP 200). The user must still get a real reply, and the empty turn must not
+    enter history."""
+    fake_client.script(([], "refusal"), [text_block("Logged.")])
+    reply = harness.handle(_msg("40g jumbo oats"))
+    assert "nothing was logged" in reply.lower()
+
+    harness.handle(_msg("40g jumbo oats", ts=DEFAULT_TS + timedelta(seconds=10)))
+    assert fake_client.calls[1]["messages"] == [           # refused turn left no trace
+        {"role": "user", "content": "40g jumbo oats"},
+    ]
+
+
 def test_context_is_not_polluted_by_a_failed_turn(fake_client):
     """A turn that raises never reaches history.save, so a retry starts clean rather than
     inheriting a half-finished exchange."""
