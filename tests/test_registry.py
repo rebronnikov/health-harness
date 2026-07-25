@@ -26,7 +26,14 @@ def test_feature_by_domain_resolves_and_raises():
 
 def test_ingesting_features_are_the_domain_projectors():
     domains = {f.domain for f in registry.ingesting_features()}
-    assert domains == {"steps", "weight", "measurements", "food_catalog", "food_log"}
+    assert domains == {"steps", "weight", "measurements", "food_catalog", "food_log",
+                       "corrections"}
+
+
+def test_corrections_replays_last():
+    """rebuild_db replays domains in FEATURES order, and a correction must land after the
+    rows it corrects. Registry order is load-bearing, not cosmetic — see corrections.py."""
+    assert registry.ingesting_features()[-1].domain == "corrections"
 
 
 def test_init_schema_is_idempotent():
