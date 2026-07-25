@@ -339,42 +339,38 @@ def list_catalog() -> list[dict]:
     return _catalog_rows(get_conn())
 
 
-_NAME_W = 15  # name column width; longer names are truncated to keep columns aligned
-_CATALOG_HEADER = ("name", "port", "kcal", "P", "C", "F", "fib")
-
-
 def _fmt_portion(qty: float, unit: str) -> str:
     return f"{qty:g}{'ea' if unit == 'each' else unit}"
 
 
-def _catalog_line(name: str, port: str, kcal: str, p: str, c: str, f: str, fib: str) -> str:
-    return f"{name:<{_NAME_W}} {port:<5} {kcal:>4} {p:>5} {c:>5} {f:>5} {fib:>4}"
+def _fmt_g(value: float) -> str:
+    """Grams, as short as stays honest: whole numbers bare, one decimal only below 10
+    where a rounded gram would be a big relative error (0.4g protein is not 0g)."""
+    if value == int(value):
+        return str(int(value))
+    return f"{value:.1f}" if value < 10 else str(round(value))
 
 
 def render_catalog_table(rows: list[dict]) -> str:
-    """Plain-text, fixed-width table of the catalog — one row per food, all five
-    macros. Channel-neutral (no markup) so it stays unit-testable; the adapter wraps
-    it in a Telegram <pre> block. kcal is rounded to a whole number, the macros to one
-    decimal, and long names are truncated (…) so the columns line up."""
+    """Plain-text listing of the catalog, two lines per food: the name and its reference
+    portion, then that portion's calories and macros. Channel-neutral (no markup) so it
+    stays unit-testable; the adapter wraps it in a Telegram <pre> block.
+
+    It was one fixed-width row per food, which needed ~49 characters and wrapped on an
+    iPhone — the last column landed on the next line and the alignment fell apart. Names
+    are the one thing that must survive, since logging a saved food means using its exact
+    name, so the fix gives the name its own full-width line instead of truncating it into
+    a column. Nothing is aligned across items now, so nothing can wrap out of alignment.
+    """
     n = len(rows)
-    lines = [
-        f"Food catalog · {n} item{'' if n == 1 else 's'}",
-        "",
-        _catalog_line(*_CATALOG_HEADER),
-    ]
+    lines = [f"Food catalog · {n} item{'' if n == 1 else 's'}", ""]
     for r in rows:
-        name = r["name"]
-        if len(name) > _NAME_W:
-            name = name[:_NAME_W - 1] + "…"
-        lines.append(_catalog_line(
-            name,
-            _fmt_portion(r["ref_qty"], r["ref_unit"]),
-            f"{round(r['kcal'])}",
-            f"{r['protein_g']:.1f}",
-            f"{r['carb_g']:.1f}",
-            f"{r['fat_g']:.1f}",
-            f"{r['fibre_g']:.1f}",
-        ))
+        lines.append(f"{r['name']} · {_fmt_portion(r['ref_qty'], r['ref_unit'])}")
+        lines.append(
+            f"  {round(r['kcal'])}kcal  "
+            f"P{_fmt_g(r['protein_g'])} C{_fmt_g(r['carb_g'])} F{_fmt_g(r['fat_g'])} "
+            f"fib{_fmt_g(r['fibre_g'])}"
+        )
     return "\n".join(lines)
 
 

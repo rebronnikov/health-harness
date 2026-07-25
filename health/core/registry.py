@@ -8,10 +8,10 @@ from __future__ import annotations
 import sqlite3
 
 from health.core.contracts import Feature
-from health.features import corrections, food, measurements, steps, weight
+from health.features import corrections, food, measurements, review, steps, weight
 
 # Add modules here as features are built (uncomment when implemented):
-# from health.features import exercise, review
+# from health.features import exercise
 # NOTE: targets is a compute lib (constants + remaining/suggest math) imported by
 # food, not a routed feature — it declares no tools, so it isn't listed here.
 
@@ -21,8 +21,8 @@ FEATURES: list[Feature] = [
     food.CATALOG_FEATURE,
     food.LOG_FEATURE,
     measurements.FEATURE,
+    review.FEATURE,          # read-only: no domain, so rebuild never sees it
     # exercise.FEATURE,
-    # review.FEATURE,
     # corrections MUST STAY LAST. rebuild_db replays domains in this order, and a
     # correction has to be applied after the rows it corrects — see corrections.py.
     corrections.FEATURE,

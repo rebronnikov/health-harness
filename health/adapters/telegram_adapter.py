@@ -62,7 +62,37 @@ async def _on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if len(detail) > 250:
             detail = detail[:250] + "…"
         reply = f"⚠️ Couldn't process that — nothing was logged.\n{type(e).__name__}: {detail}"
-    await ctx.bot.send_message(chat_id=chat.id, text=reply)
+    for part in split_reply(reply):
+        await ctx.bot.send_message(chat_id=chat.id, text=part)
+
+
+def split_reply(text: str, limit: int = TELEGRAM_MAX_CHARS) -> list[str]:
+    """Split a reply into messages Telegram will accept, preferring line boundaries.
+
+    sendMessage rejects anything over 4096 characters, so a long reply — a multi-day
+    summary, say — would fail outright and the user would get nothing. Splitting on
+    newlines keeps a per-day list readable; a single line longer than the limit is cut
+    hard, because there is nothing better to do with it.
+    """
+    if len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        while len(line) > limit:                 # one absurdly long line: hard-cut it
+            if current:
+                parts.append(current)
+                current = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+        if current and len(current) + 1 + len(line) > limit:
+            parts.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        parts.append(current)
+    return parts
 
 
 def _catalog_messages(rows: list[dict]) -> list[str]:

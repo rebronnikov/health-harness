@@ -23,10 +23,11 @@ log = logging.getLogger(__name__)
 
 client = Anthropic()                 # reads ANTHROPIC_API_KEY from env
 
-# On the Claude 5 family thinking is on by default and shares this cap with the
-# reply text, so it needs headroom beyond the reply itself (Telegram caps a
-# message at 4096 chars anyway).
-MAX_TOKENS = 4096
+# On the Claude 5 family thinking is on by default and shares this cap with the reply
+# text, so it needs headroom beyond the reply itself. The adapter splits anything over
+# Telegram's 4096-CHAR limit, so the reply is bounded well below this and the slack goes
+# to thinking — a weekly summary shouldn't be cut off mid-sentence by its own reasoning.
+MAX_TOKENS = 8192
 EFFORT = "medium"                    # thinking depth; routing + extraction needs no more
 
 # One message can legitimately need several rounds (propose -> show, or query -> edit ->
