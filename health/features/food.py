@@ -557,7 +557,10 @@ LOG_TOOLS = [
             "FOODS — log it by its catalog name via log_food, or ask to clarify if unsure which. "
             "This SAVES NOTHING — it returns your estimate for you to show the user "
             "and ask them to confirm. Only after they confirm (e.g. 'yes', 'looks right') do you "
-            "call confirm_pending to actually log it. Give your best per-item macro estimate."
+            "call confirm_pending to actually log it. Give your best per-item macro estimate. "
+            "This is also the ONLY route for macros you looked up with web_search — a looked-up "
+            "number is still an estimate the user has not seen; say where it came from when you "
+            "show it."
         ),
         "input_schema": {
             "type": "object",

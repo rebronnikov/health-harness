@@ -1,0 +1,108 @@
+"""harness.handle × the tool-use loop itself — the parts that aren't about any feature.
+
+Three things the loop has to get right once server-side tools are in play: a paused turn
+is resumed rather than mistaken for a short answer, blocks the harness doesn't own are
+passed through instead of dispatched, and a model that keeps calling tools is cut off
+with an honest reply rather than an unbounded spend.
+"""
+from datetime import timedelta
+
+from health.core import harness
+from health.core.contracts import NormalizedMessage
+from health.core.registry import all_executors, all_tools
+
+from conftest import DEFAULT_TS, raw_block, text_block, tool_block
+
+DAY = "2026-07-14"
+
+
+def _msg(text, handle="chat-1", ts=DEFAULT_TS):
+    return NormalizedMessage(source="telegram", reply_handle=handle, timestamp=ts, text=text)
+
+
+def test_pause_turn_resumes_instead_of_answering(fake_client):
+    """A server tool that pauses mid-answer returns stop_reason 'pause_turn' with partial
+    content. Re-sending the paused turn resumes it; treating it as final would ship a
+    truncated reply (and, here, no reply text at all)."""
+    paused = [raw_block("server_tool_use", id="srv-1", name="web_search",
+                        input={"query": "bounty bar nutrition"})]
+    fake_client.script((paused, "pause_turn"), [text_block("A Bounty bar is ~275 kcal.")])
+
+    reply = harness.handle(_msg("how many calories in a bounty bar?"))
+
+    assert reply == "A Bounty bar is ~275 kcal."
+    assert len(fake_client.calls) == 2
+    assert fake_client.calls[1]["messages"] == [       # the paused turn, no injected user turn
+        {"role": "user", "content": "how many calories in a bounty bar?"},
+        {"role": "assistant", "content": paused},
+    ]
+
+
+def test_pause_turn_leaves_only_the_final_text_in_history(fake_client):
+    paused = [raw_block("server_tool_use", id="srv-1", name="web_search", input={"query": "x"})]
+    fake_client.script((paused, "pause_turn"), [text_block("~275 kcal.")], [text_block("Sure.")])
+    harness.handle(_msg("bounty bar?"))
+    harness.handle(_msg("thanks", ts=DEFAULT_TS + timedelta(seconds=30)))
+
+    assert fake_client.calls[2]["messages"] == [
+        {"role": "user", "content": "bounty bar?"},
+        {"role": "assistant", "content": "~275 kcal."},
+        {"role": "user", "content": "thanks"},
+    ]
+
+
+def test_server_tool_blocks_are_never_dispatched_locally(fake_client):
+    """Server tools run on Anthropic's side, so their blocks arrive already resolved.
+    The harness dispatches `tool_use` only — anything else falls through to the model,
+    including the in-band error objects a failed search returns."""
+    fake_client.script([
+        raw_block("server_tool_use", id="srv-1", name="web_search", input={"query": "x"}),
+        raw_block("web_search_tool_result", tool_use_id="srv-1",
+                  content={"error_code": "max_uses_exceeded"}),
+        text_block("Couldn't look that up — I'll estimate instead."),
+    ])
+
+    reply = harness.handle(_msg("bounty bar?"))
+
+    assert reply == "Couldn't look that up — I'll estimate instead."
+    assert len(fake_client.calls) == 1            # no local tool round-trip was attempted
+
+
+def test_web_search_is_offered_after_the_registry_tools(fake_client):
+    """Registry tools keep a stable prefix; server tools are appended. web_search has no
+    executor by design — the registry never sees it."""
+    fake_client.script([text_block("ok")])
+    harness.handle(_msg("hi"))
+
+    tools = fake_client.calls[0]["tools"]
+    n = len(harness.SERVER_TOOLS)
+    assert tools[-n:] == harness.SERVER_TOOLS
+    assert tools[:-n] == all_tools()
+    assert "web_search" not in all_executors()
+
+
+def test_loop_cap_returns_an_honest_reply(fake_client):
+    """A model that keeps calling tools is cut off at MAX_LOOP_ITERATIONS. The reply says
+    so rather than summarising work we can't account for."""
+    fake_client.script(*[
+        [tool_block("get_day_totals", {"date": DAY}, id=f"tu-{i}")]
+        for i in range(harness.MAX_LOOP_ITERATIONS)
+    ])
+
+    reply = harness.handle(_msg("how am I doing?"))
+
+    assert reply == harness.LOOP_LIMIT_REPLY
+    assert len(fake_client.calls) == harness.MAX_LOOP_ITERATIONS
+
+
+def test_loop_cap_reply_does_not_enter_history(fake_client):
+    """The cut-off turn is a failure, not an exchange — a retry starts clean."""
+    fake_client.script(*[
+        [tool_block("get_day_totals", {"date": DAY}, id=f"tu-{i}")]
+        for i in range(harness.MAX_LOOP_ITERATIONS)
+    ])
+    harness.handle(_msg("how am I doing?"))
+    fake_client.script([text_block("216 kcal so far.")])
+    harness.handle(_msg("how am I doing?", ts=DEFAULT_TS + timedelta(seconds=30)))
+
+    assert fake_client.calls[-1]["messages"] == [{"role": "user", "content": "how am I doing?"}]

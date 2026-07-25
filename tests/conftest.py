@@ -129,6 +129,12 @@ def tool_block(name, input, id="tu-1"):
     return _Block("tool_use", id=id, name=name, input=input)
 
 
+def raw_block(type_, **attrs):
+    """A block of any other type — server_tool_use, web_search_tool_result, thinking.
+    The harness must pass these through untouched rather than dispatch them."""
+    return _Block(type_, **attrs)
+
+
 class FakeAnthropic:
     """Scripted Anthropic client: returns queued responses and records every request.
     `calls[i]["messages"]` is what makes the harness's context assembly assertable."""
