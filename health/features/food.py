@@ -461,7 +461,8 @@ def catalog_system_context(msg) -> str | None:
         "macros are used instead of estimating. If a mention could match more than one of "
         "these (e.g. two salmon fillets), or you're unsure whether a saved food is meant, "
         "pick the most likely reading and log or propose it — say which one you assumed so "
-        "the user can correct you. Never ask instead of logging.\n" + lines
+        "the user can correct you. Ask only when the candidates differ enough to matter "
+        "(a 90 kcal gap, not a 5 kcal one); otherwise log the likeliest.\n" + lines
     )
 
 

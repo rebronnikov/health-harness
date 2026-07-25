@@ -2,6 +2,20 @@
 
 Tracked follow-ups for the health bot. Ordered roughly by priority; not commitments.
 
+## Done
+
+- **Corrections (edit / delete)** — `query_log`, `edit_entry`, `delete_entry` in
+  `health/features/corrections.py`. Append-only events; `project()` applies UPDATE/DELETE
+  to the target table; every event pins the target's `ingested_at` so a superseded
+  correction replays as a no-op. Must stay last in `FEATURES`.
+- **Weekly review / analytics** — `get_summary` in `health/features/review.py`, the first
+  read-only feature (no schema/domain/project).
+- **Web nutrition lookup** — `web_search` declared in the harness; looked-up macros route
+  through the existing propose → confirm gate, never a new write path.
+- **Bot may ask one question** — the flat "never ask" rule is now bias-to-act with a
+  one-question cap. See CLAUDE.md for the three guardrails that make it safe.
+- **`/catalog` too wide for iPhone** — two lines per food; names are no longer truncated.
+
 ## In progress
 
 ### Name matching for the catalog
@@ -13,21 +27,6 @@ says what it assumed — it does **not** ask.  Implemented as
 a `system_context` on `CATALOG_FEATURE` in `health/features/food.py`.
 
 ## Next
-
-### Gate guessed *amounts*, not just guessed macros
-The estimate gate keys on the wrong thing. `log_food` defers to
-`propose_food_estimate` → `confirm_pending` only when **macros** must be estimated; a
-catalog hit whose **quantity** Claude guessed auto-commits on the spot. Now that the bot
-is forbidden to ask before logging, it guesses amounts routinely — and a guessed amount
-is as much a fabrication as a guessed macro.
-
-When a mixed dish omits an ingredient weight, an inferred quantity can be wrong. Corrections let the user fix that row.
-
-Likely shape: Claude flags a per-item `amount_assumed: true` (it knows when it guessed);
-`log_food` routes those items into `_pending` instead of writing them, still resolving
-the macros from the catalog itself — so "Claude never does arithmetic" holds and the
-existing confirm path does the rest. Alternative: activate the stubbed `corrections`
-feature so a wrong row can be amended. Not yet decided.
 
 ### Meals layer (repeatable meals)
 Two-layer food model. Ingredients already exist (the `food_catalog`). A **meal** is
@@ -43,7 +42,11 @@ self-contained). Behaviour agreed with the owner:
   and can be saved as an ingredient.
 Likely shape: a new `meal_catalog` (slug + component list) mirroring how
 `food_catalog` + `log_food` already compose; a `log_meal(meal_slug, date, overrides)`
-executor that expands to `food_log` rows.
+executor that expands to `food_log` rows. Two things it will want that don't exist yet:
+`log_food`'s body refactored into a shared `_resolve_and_log(date, meal, items)` so meal
+expansion reuses catalog scaling, the estimate path, occasion numbering and accumulation
+for free; and `"meal_catalog"` added to `query_log`'s domain enum. Corrections already
+work on the expanded rows untouched, since those are ordinary `food_log` entries.
 
 ## Later
 
@@ -56,27 +59,16 @@ executor that expands to `food_log` rows.
   suggestions past `SUGGEST_AFTER_HOUR`. Still to do: set targets from a bot message
   (needs a persisted store instead of constants), derive them from body weight + goal
   once `measurements` lands, and swap the placeholder numbers for the owner's aligned values.
-- **Weight & body measurements** — `measurements.py` stub. Enables weight-loss
-  tracking and target derivation.
-- **Corrections (edit / delete)** — `corrections.py` stub. Edits/deletes recorded as
-  new append-only JSONL events (never mutate prior lines); projection reflects the
-  latest via the same dedupe upsert. Today the only way to fix an entry is to
-  re-log over the same dedupe key.
-- **Weekly review / analytics** — `review.py` stub. Read-only summaries over the
-  SQLite projection (uses the catalog `notes` for micronutrient / composition
-  context).
+- **Richer summaries** — `get_summary` returns food/steps/weight/measurements over a
+  range. Not yet in it: week-over-week comparison, day-of-week patterns, and the catalog
+  `notes` for micronutrient / composition context.
+- **Exercise** — `exercise.py` stub, the last one left.
 - **Catalog search tool** — if the catalog grows to hundreds of items, replace the
   always-on catalog list in the bot's context with an on-demand `find_food(query)`
   search tool.
-- **`/catalog` table too wide for iPhone** — the `/catalog` listing renders as a
-  fixed-width `<pre>` table (~49 chars/row: name + port + kcal + P/C/F/fib). On a
-  narrow iPhone screen the last column (`fib`) wraps onto the next line instead of
-  scrolling, breaking the alignment. Fix by fitting a row into a phone-safe width
-  (~30–34 chars). Options: narrow the name column and tighten macro widths; drop or
-  fold the fibre column (e.g. show it only in a per-item detail view); or switch to a
-  two-line-per-item layout (name+portion on line 1, macros on line 2). Lives in
-  `render_catalog_table` in `health/features/food.py` (the pure renderer) — the
-  Telegram `<pre>` wrapping in `telegram_adapter.py` doesn't need to change.
+- **Correcting a catalog entry by message** — `corrections` deliberately covers the dated
+  logs only. `save_food` overwrites an entry by name, but there's no way to *delete* a
+  saved food (e.g. a duplicate) short of editing `data/food_catalog.jsonl` + rebuilding.
 
 ## Pending data / quirks
 

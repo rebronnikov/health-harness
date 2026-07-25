@@ -26,7 +26,12 @@ from datetime import datetime, timedelta
 from typing import Any
 
 MAX_TURNS = 10                          # user+assistant pairs kept per chat
-IDLE_EXPIRY = timedelta(minutes=30)     # silence longer than this starts a fresh thread
+# Silence longer than this starts a fresh thread. 90 rather than 30 minutes because the
+# bot may now ask a question: an answer that lands after a meal, a commute, or a meeting
+# has to still find the question it answers. The staleness risk it guards against is a
+# bare "40g" steering off an hours-old thread, and an hour and a half is still well
+# inside the window where a reply plausibly belongs to what came before.
+IDLE_EXPIRY = timedelta(minutes=90)
 
 # reply_handle -> {"last": datetime, "messages": [ {role, content}, ... ]}
 _history: dict[Any, dict] = {}
