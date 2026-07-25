@@ -28,30 +28,48 @@ CREATE TABLE IF NOT EXISTS steps (
 TOOLS = [{
     "name": "log_steps",
     "description": (
-        "Log the user's step count for a day. One row per (date, source); "
-        "re-logging the same day overwrites the previous count. Pass the step "
-        "count as a plain integer — do not do any arithmetic yourself."
+        "Log the user's step counts. Takes a LIST of days, so a whole backlog pasted from "
+        "another app ('14 Jul 8,213 / 15 Jul 10,455 / ...') goes in one call — send one "
+        "entry per day rather than calling this repeatedly. A single day is a list of one. "
+        "One row per (date, source); re-logging a day overwrites that day's count. Read "
+        "the numbers straight off the message: strip thousands separators, but never add, "
+        "average or otherwise compute a count yourself."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "date": {
-                "type": "string",
-                "description": "ISO date YYYY-MM-DD. Use today if the user didn't specify one.",
-            },
-            "count": {
-                "type": "integer",
-                "description": "Step count as a whole number.",
+            "entries": {
+                "type": "array",
+                "description": "One entry per day.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "date": {
+                            "type": "string",
+                            "description": "ISO date YYYY-MM-DD. Use today if the user didn't specify one.",
+                        },
+                        "count": {
+                            "type": "integer",
+                            "description": "Step count as a whole number.",
+                        },
+                    },
+                    "required": ["date", "count"],
+                },
             },
         },
-        "required": ["date", "count"],
+        "required": ["entries"],
     },
 }]
 
 
-def log_steps(date: str, count: int) -> dict:
-    # Dumb executor: build the SI-unit fields, hand off to the shared writer.
-    return writer.record("steps", {"date": date, "count": int(count)})
+def log_steps(entries: list[dict] | None = None) -> dict:
+    # Dumb executor: build the SI-unit fields, hand off to the shared writer, once per day.
+    # A list rather than a single day because steps arrive in backlogs — they're logged in
+    # another app and pasted here days later. The harness would dispatch N parallel calls
+    # happily enough, but one call is one lock pass and can't be split across turns.
+    logged = [writer.record("steps", {"date": e["date"], "count": int(e["count"])})
+              for e in entries or []]
+    return {"logged": logged, "days": len(logged)}
 
 
 def project(conn: sqlite3.Connection, row: dict) -> None:

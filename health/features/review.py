@@ -49,6 +49,7 @@ def _food(conn: sqlite3.Connection, start_date: str, end_date: str) -> dict:
     out = {"per_day": per_day, "days_logged": len(per_day), "targets": targets.TARGETS}
     if not per_day:
         return {**out, "average": None, "days_over_kcal_ceiling": 0,
+                "days_over_fat_ceiling": 0,
                 "days_protein_floor_met": 0, "days_fibre_floor_met": 0}
 
     t = targets.TARGETS
@@ -58,6 +59,7 @@ def _food(conn: sqlite3.Connection, start_date: str, end_date: str) -> dict:
         **out,
         "average": {k: round(sum(d[k] for d in per_day) / len(per_day), 1) for k in _MACROS},
         "days_over_kcal_ceiling": sum(1 for d in per_day if d["kcal"] > t["kcal"]),
+        "days_over_fat_ceiling": sum(1 for d in per_day if d["fat_g"] > t["fat_g"]),
         "days_protein_floor_met": sum(
             1 for d in per_day if d["protein_g"] >= t["protein_g"] - targets.PROTEIN_MET_TOL_G),
         "days_fibre_floor_met": sum(
@@ -106,6 +108,39 @@ def _weight(conn: sqlite3.Connection, start_date: str, end_date: str) -> dict:
     }
 
 
+def _exercise(conn: sqlite3.Connection, start_date: str, end_date: str) -> dict:
+    # Training rolled up per movement: how often, how much work, the heaviest load, and
+    # how hard it felt. Sets are summed rather than averaged because "12 sets of bench
+    # this week" is the number that answers "am I training enough?".
+    rows = conn.execute(
+        "SELECT date, exercise, sets, weight_kg, duration_min, rpe FROM exercise "
+        "WHERE date BETWEEN ? AND ? ORDER BY date",
+        (start_date, end_date),
+    ).fetchall()
+    if not rows:
+        return {"days_logged": 0, "entries": 0, "by_exercise": {}, "average_rpe": None}
+
+    by_exercise: dict[str, dict] = {}
+    for r in rows:
+        agg = by_exercise.setdefault(
+            r["exercise"], {"entries": 0, "total_sets": 0, "heaviest_kg": None,
+                            "total_minutes": 0.0})
+        agg["entries"] += 1
+        agg["total_sets"] += r["sets"] or 0
+        # duration_min is per set ("3 x 60s plank" is sets=3, duration_min=1), so the
+        # time actually spent is sets x duration.
+        agg["total_minutes"] += (r["duration_min"] or 0.0) * (r["sets"] or 1)
+        if r["weight_kg"] is not None:
+            agg["heaviest_kg"] = max(agg["heaviest_kg"] or 0.0, r["weight_kg"])
+    rpes = [r["rpe"] for r in rows if r["rpe"] is not None]
+    return {
+        "days_logged": len({r["date"] for r in rows}),
+        "entries": len(rows),
+        "by_exercise": by_exercise,
+        "average_rpe": round(sum(rpes) / len(rpes), 1) if rpes else None,
+    }
+
+
 def _measurements(conn: sqlite3.Connection, start_date: str, end_date: str) -> dict:
     # The latest reading per metric inside the range — a body measurement is a level,
     # not something you average over a week.
@@ -128,6 +163,7 @@ def get_summary(start_date: str, end_date: str) -> dict:
         "food": _food(conn, start_date, end_date),
         "steps": _steps(conn, start_date, end_date),
         "weight": _weight(conn, start_date, end_date),
+        "exercise": _exercise(conn, start_date, end_date),
         "measurements": _measurements(conn, start_date, end_date),
     }
 

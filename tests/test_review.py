@@ -10,7 +10,7 @@ from health.core import harness
 from health.core.contracts import NormalizedMessage
 from health.features import corrections, food, measurements, review, steps, targets, weight
 
-from conftest import DEFAULT_TS, text_block, tool_block
+from conftest import DEFAULT_TS, log_steps, text_block, tool_block
 
 MON, TUE, WED = "2026-07-13", "2026-07-14", "2026-07-15"
 WEEK = ("2026-07-13", "2026-07-19")
@@ -21,8 +21,8 @@ def _seed_three_days(ctx, catalog):
     food.log_food(MON, "breakfast", [{"name": "skyr", "quantity": 200, "unit": "g"}])
     food.log_food(TUE, "breakfast", [{"name": "skyr", "quantity": 100, "unit": "g"}])
     food.log_food(TUE, "lunch", [{"name": "banana", "quantity": 2, "unit": "each"}])
-    steps.log_steps(MON, 9000)
-    steps.log_steps(TUE, 12000)
+    log_steps(MON, 9000)
+    log_steps(TUE, 12000)
     weight.log_weight(MON, 72.8)
     weight.log_weight(WED, 71.8)
     measurements.log_measurement(MON, "waist", 79.4)
@@ -62,6 +62,7 @@ def test_ceiling_and_floor_counters(ctx, catalog):
 
     out = review.get_summary(*WEEK)["food"]
     assert out["days_over_kcal_ceiling"] == 1
+    assert out["days_over_fat_ceiling"] == 1          # 90g on the feast day, ceiling is 75
     assert out["days_protein_floor_met"] == 1
     assert out["days_fibre_floor_met"] == 1
 

@@ -20,7 +20,16 @@ CHOCOLATE = {"name": "chocolate", "ref_qty": 100, "ref_unit": "g", "kcal": 535,
 BRAN = {"name": "bran", "ref_qty": 100, "ref_unit": "g", "kcal": 100,
         "protein_g": 0.5, "carb_g": 20, "fat_g": 1, "fibre_g": 10,
         "notes": "typical serving 30g"}                        # serving 30g: 30 kcal, 3g fibre
+# Protein-bearing but fat-heavy — the food that closes a protein gap only by breaching
+# the fat ceiling, which is exactly the trade-off `over` exists to surface.
+NUTS = {"name": "nuts", "ref_qty": 100, "ref_unit": "g", "kcal": 600,
+        "protein_g": 20, "carb_g": 20, "fat_g": 50, "fibre_g": 7,
+        "notes": "typical serving 30g"}                        # serving 30g: 180 kcal, 6g protein, 15g fat
 CATALOG = [SKYR, LENTILS, CHOCOLATE, BRAN]
+
+# Generous room: nothing in the test catalog can breach it, so a pick's placement is
+# decided by ranking alone.
+ROOMY = {"kcal": 3000, "fat_g": 300, "carb_g": 500}
 
 
 def _remaining(kcal=0, protein_g=0, carb_g=0, fat_g=0, fibre_g=0):
@@ -53,28 +62,38 @@ def test_remaining_track_signed():
     assert r["fat_g"]["remaining"] == pytest.approx(20.0)          # 70 - 50
 
 
+def test_remaining_fat_is_a_ceiling():
+    # Fat was "tracked" until 2026-07-25; it is a ceiling now, like calories.
+    under = _remaining(fat_g=50)["fat_g"]
+    assert under["direction"] == "ceiling"
+    assert under["remaining"] == pytest.approx(20.0)
+    assert _remaining(fat_g=90)["fat_g"]["remaining"] == pytest.approx(-20.0)
+
+
 # --- suggest() modes ------------------------------------------------------------
 
 def test_suggest_protein_only_mode():
     rem = _remaining(kcal=1000, protein_g=100, fibre_g=26)        # protein short 50; fibre within tol
     out = targets.suggest(rem, CATALOG)
     assert out["mode"] == "protein"
-    assert 0 < len(out["picks"]) <= 5
-    assert all(p["closes"] == "protein" for p in out["picks"])
+    assert 0 < len(out["fits"]) <= 5
+    assert all(p["closes"] == "protein" for p in out["fits"])
+    assert all(p["over"] == {} for p in out["fits"])              # "fits" means fits every ceiling
+    assert out["room"]["fat_g"] == pytest.approx(70.0)            # nothing eaten -> full fat ceiling
 
 
 def test_suggest_fibre_only_mode():
     rem = _remaining(kcal=1000, protein_g=148, fibre_g=10)        # protein met (2 short, within 5); fibre short 18
     out = targets.suggest(rem, CATALOG)
     assert out["mode"] == "fibre"
-    assert all(p["closes"] == "fibre" for p in out["picks"])
+    assert all(p["closes"] == "fibre" for p in out["fits"])
 
 
 def test_suggest_protein_plus_fibre_mode():
     rem = _remaining(kcal=1000, protein_g=100, fibre_g=10)        # both floors unmet
     out = targets.suggest(rem, CATALOG)
     assert out["mode"] == "protein+fibre"
-    closes = {p["closes"] for p in out["picks"]}
+    closes = {p["closes"] for p in out["fits"]}
     assert "protein" in closes and "fibre" in closes
 
 
@@ -82,7 +101,49 @@ def test_suggest_treat_mode_when_floors_met():
     rem = _remaining(kcal=1000, protein_g=148, fibre_g=26)        # both floors met, 1200 kcal room
     out = targets.suggest(rem, CATALOG)
     assert out["mode"] == "treat"
-    assert out["picks"] and out["picks"][0]["closes"] == "treat"
+    assert out["fits"] and out["fits"][0]["closes"] == "treat"
+    assert out["off_catalog_ok"] is False                         # a treat is not worth ranging off-catalog for
+
+
+# --- ceilings: what fits, what doesn't, and by how much --------------------------
+
+def test_pick_breaching_fat_ceiling_lands_in_over_with_the_gram_count():
+    # 5g of fat room left; one 30g serving of nuts carries 15g -> 10g past the ceiling.
+    rem = _remaining(kcal=1000, protein_g=100, fat_g=65, fibre_g=26)
+    out = targets.suggest(rem, [NUTS])
+    assert out["fits"] == []
+    assert [p["name"] for p in out["over"]] == ["nuts"]
+    assert out["over"][0]["over"] == {"fat_g": pytest.approx(10.0)}
+    assert out["over"][0]["covers_g"] == pytest.approx(6.0)        # still closes 6g of protein
+
+
+def test_overshoot_counts_from_an_already_negative_room():
+    # Already 5g past the fat ceiling: the serving's own 15g lands 20g past, not 15.
+    rem = _remaining(kcal=1000, protein_g=100, fat_g=75, fibre_g=26)
+    out = targets.suggest(rem, [NUTS])
+    assert out["over"][0]["over"]["fat_g"] == pytest.approx(20.0)
+
+
+def test_fitting_pick_is_preferred_over_a_breaching_one():
+    # Same tight fat room, but skyr's serving is 0.21g of fat — it fits and ranks first.
+    rem = _remaining(kcal=1000, protein_g=100, fat_g=65, fibre_g=26)
+    out = targets.suggest(rem, [NUTS, SKYR])
+    assert [p["name"] for p in out["fits"]] == ["skyr"]
+    assert [p["name"] for p in out["over"]] == ["nuts"]
+
+
+def test_off_catalog_ok_only_when_the_catalog_comes_up_short():
+    tight = _remaining(kcal=1000, protein_g=100, fat_g=65, fibre_g=26)
+    assert targets.suggest(tight, [NUTS])["off_catalog_ok"] is True     # nothing fits
+    roomy = _remaining(kcal=1000, protein_g=100, fibre_g=26)
+    assert targets.suggest(roomy, CATALOG)["off_catalog_ok"] is False   # plenty fits
+
+
+def test_picks_carry_carbs_and_fat():
+    # Both were dropped from picks before ceilings existed; the reply needs them now.
+    rem = _remaining(kcal=1000, protein_g=100, fibre_g=26)
+    pick = targets.suggest(rem, CATALOG)["fits"][0]
+    assert {"carb_g", "fat_g"} <= set(pick)
 
 
 def test_suggest_none_when_floors_met_and_low_kcal():
@@ -104,20 +165,31 @@ def test_suggest_over_budget_but_floors_met_is_none():
 
 # --- internals: serving/ranking/rounding ---------------------------------------
 
-def test_serving_pick_filters_by_kcal_room():
-    assert targets._serving_pick(SKYR, "protein_g", 50) is None   # a 210g serving is 107.1 kcal > 50
-    pick = targets._serving_pick(SKYR, "protein_g", 200)
-    assert pick is not None
+def test_serving_pick_tags_overshoot_instead_of_dropping_the_food():
+    # A 210g serving is 107.1 kcal. With 50 kcal of room it used to be filtered out
+    # entirely; now it comes back tagged, so the reply can offer it with the cost named.
+    tight = targets._serving_pick(SKYR, "protein_g", {"kcal": 50, "fat_g": 70, "carb_g": 250})
+    assert tight is not None
+    assert tight["over"] == {"kcal": pytest.approx(57.1)}
+    pick = targets._serving_pick(SKYR, "protein_g", ROOMY)
+    assert pick["over"] == {}
     assert pick["covers_g"] == pick["protein_g"]                  # covers_g mirrors the closed nutrient
 
 
 def test_rank_servings_orders_by_coverage_then_leanness():
     # Non-lean: most protein delivered per serving first. Lentils(18g) > skyr(18.9g)? skyr 18.9 > lentils 18.
-    by_serving = targets._rank_servings(CATALOG, "protein_g", 3000, top=3)
+    by_serving = targets._rank_servings(CATALOG, "protein_g", ROOMY, top=3)
     assert by_serving[0]["name"] == "skyr"
     # Lean: most protein per kcal first -> skyr (9/51) beats lentils (9/116) beats chocolate.
-    lean = targets._rank_servings(CATALOG, "protein_g", None, top=3, lean=True)
+    lean = targets._rank_servings(CATALOG, "protein_g", ROOMY, top=3, lean=True)
     assert lean[0]["name"] == "skyr"
+
+
+def test_rank_servings_keeps_a_couple_of_breaching_options():
+    # Zero fat room: everything breaches, and the caller still gets options back.
+    none_fit = targets._rank_servings(CATALOG, "protein_g", {"kcal": 3000, "fat_g": 0, "carb_g": 500}, top=3)
+    assert none_fit and all(p["over"] for p in none_fit)
+    assert len(none_fit) <= 2                                     # capped: fallbacks, not a full list
 
 
 @pytest.mark.parametrize("amount,unit,expected", [

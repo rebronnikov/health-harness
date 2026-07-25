@@ -26,8 +26,8 @@ import pytest
 
 from health import rebuild_db
 from health.core import contracts, history, registry
-from health.features import food
-from health.store import connection, writer
+from health.features import corrections, food
+from health.store import connection, msg_log, writer
 
 # Noon on the app's "today" — deliberately NOT evening, so the food suggestion
 # gate (hour >= 16) is off unless a test overrides the timestamp.
@@ -56,6 +56,7 @@ def isolate(monkeypatch, tmp_path):
     advancing clock, and cleared in-process state (pending estimate, chat history)."""
     # Redirect every by-value copy of the data paths to this test's tmp dir.
     monkeypatch.setattr(writer, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(msg_log, "DATA_DIR", tmp_path)         # the transcript keeps its own copy
     monkeypatch.setattr(connection, "DATA_DIR", tmp_path)
     monkeypatch.setattr(connection, "DB_PATH", tmp_path / "health.sqlite")
     monkeypatch.setattr(rebuild_db, "DATA_DIR", tmp_path)
@@ -71,10 +72,14 @@ def isolate(monkeypatch, tmp_path):
 
     monkeypatch.setattr(writer, "datetime", _AdvancingClock(DEFAULT_TS))
     food._pending.clear()
+    food._offer.clear()
+    corrections._listing.clear()
     history.clear()
     yield
     conn.close()
     food._pending.clear()
+    food._offer.clear()
+    corrections._listing.clear()
     history.clear()
 
 
@@ -175,3 +180,13 @@ def fake_client(monkeypatch):
 def rows(conn, sql, params=()):
     """Fetch rows as plain dicts (sqlite3.Row -> dict) for easy assertions."""
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def log_steps(date, count):
+    """One day of steps, returning that single stored row.
+
+    The executor takes a list (steps arrive as pasted backlogs), but most tests care
+    about one day and its row, so this keeps them readable.
+    """
+    from health.features import steps
+    return steps.log_steps([{"date": date, "count": count}])["logged"][0]

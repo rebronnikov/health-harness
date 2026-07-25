@@ -147,23 +147,23 @@ def _status(consumed: dict, date: str) -> dict:
     return out
 
 
-_NUMBERED_MEALS = ("breakfast", "lunch", "dinner")
+# The label a food row carries until the user says which meal it belonged to. A real
+# label, not a NULL, so the row is a first-class part of the day's totals while it waits.
+UNLABELLED_MEAL = "unlabelled"
 
 
-def _occasion_label(conn: sqlite3.Connection, date: str, meal: str) -> str:
-    """Give each logging occasion a stable label. One log call = one occasion (all its
-    items share the label). Small/standalone items land in a shared `snack` bucket;
-    a main meal (breakfast/lunch/dinner) is numbered per day so a second breakfast reads
-    as `breakfast-2` rather than silently merging into the first. Uniqueness of rows is
-    guaranteed by `ingested_at` in the key regardless — the number is for readability."""
-    base = (meal or "").strip().lower()
-    if base not in _NUMBERED_MEALS:
-        return base or "snack"
-    n = conn.execute(
-        "SELECT COUNT(DISTINCT meal) FROM food_log WHERE date = ? AND (meal = ? OR meal LIKE ?)",
-        (date, base, base + "-%"),
-    ).fetchone()[0]
-    return f"{base}-{n + 1}"
+def normalise_meal(meal: str | None) -> str:
+    """Normalise the meal label. Whatever the user called it, that is the label.
+
+    This used to number repeats — two `breakfast` messages became `breakfast-1` and
+    `breakfast-2`. That was backwards: a meal is often logged across several messages
+    (the oats, then the coffee ten minutes later), and numbering split one sitting into
+    two while offering no way to merge them back. the owner delimits his own meals now; a
+    genuine second sitting is whatever he types ("second breakfast"), which passes
+    through untouched. An absent label becomes `unlabelled` — a state the bot asks about
+    and `set_meal` resolves — rather than being silently guessed at from the clock.
+    """
+    return (meal or "").strip().lower() or UNLABELLED_MEAL
 
 
 def _accumulate(acc: dict, slug: str, name: str, amount: float, unit: str,
@@ -203,6 +203,7 @@ def save_food(name: str, ref_qty: float, ref_unit: str, kcal: float,
                           {"kcal": kcal, "protein_g": protein_g, "carb_g": carb_g,
                            "fat_g": fat_g, "fibre_g": fibre_g},
                           notes=notes)
+    _clear_offer(_slug(name))            # the standing "want to save this?" is answered
     return {"saved": saved}
 
 
@@ -219,7 +220,11 @@ def _unresolved_reason(cat: sqlite3.Row | None, unit: str) -> str:
     )
 
 
-def log_food(date: str, meal: str, items: list[dict]) -> dict:
+def log_food(date: str, meal: str | None = None, items: list[dict] | None = None) -> dict:
+    # `meal` is optional (an unnamed meal logs as `unlabelled` and the bot asks), which
+    # forces `items` to carry a default too — Python won't allow a required argument after
+    # an optional one. The tool schema still requires `items`, so it is never actually absent.
+    items = items or []
     conn = get_conn()
     resolved: dict[str, dict] = {}
     unresolved: list[dict] = []
@@ -253,7 +258,7 @@ def log_food(date: str, meal: str, items: list[dict]) -> dict:
 
         _accumulate(resolved, slug, name, amount, unit, macros, catalog_slug)
 
-    meal_label = _occasion_label(conn, date, meal) if resolved else meal
+    meal_label = normalise_meal(meal)
     logged = [
         writer.record("food_log", {"date": date, "meal": meal_label, "estimated": 0, **fields})
         for fields in resolved.values()
@@ -266,11 +271,15 @@ def log_food(date: str, meal: str, items: list[dict]) -> dict:
         if not pend["rows"]:
             _pending.pop(get_context().reply_handle, None)
     return {"logged": logged, "unresolved": unresolved,
+            "meal": meal_label,
+            "needs_meal": meal_label == UNLABELLED_MEAL and bool(logged),
             "day_totals": _status(_day_totals(conn, date), date)}
 
 
-def propose_food_estimate(date: str, meal: str, items: list[dict]) -> dict:
+def propose_food_estimate(date: str, meal: str | None = None,
+                          items: list[dict] | None = None) -> dict:
     # Does NOT write. Stash the estimate keyed by chat; confirm_pending commits it.
+    items = items or []                      # see the note on log_food's signature
     ctx = get_context()
     rows = [{
         "food_slug": _slug(it["name"]), "food_name": it["name"],
@@ -309,11 +318,12 @@ def confirm_pending() -> dict:
             "pending": pend["rows"],
         }
     _pending.pop(handle)
+    _offer.pop(handle, None)             # a new commit supersedes any unanswered offer
     acc: dict[str, dict] = {}
     for r in pend["rows"]:
         _accumulate(acc, r["food_slug"], r["food_name"], r["amount"], r["amount_unit"],
                     r, r["catalog_slug"])
-    meal_label = _occasion_label(get_conn(), pend["date"], pend["meal"])
+    meal_label = normalise_meal(pend["meal"])
     logged = [
         writer.record(
             "food_log",
@@ -322,12 +332,37 @@ def confirm_pending() -> dict:
         )
         for fields in acc.values()
     ]
+    offer = _build_offer(handle, acc.values())
     return {"logged": logged,
+            "meal": meal_label,
+            "needs_meal": meal_label == UNLABELLED_MEAL and bool(logged),
+            "catalog_offer": offer,
             "day_totals": _status(_day_totals(get_conn(), pend["date"]), pend["date"])}
 
 
 def get_day_totals(date: str) -> dict:
     return _status(_day_totals(get_conn(), date), date)
+
+
+def suggest_food(date: str | None = None) -> dict:
+    """"What should I eat?" on demand, at any hour.
+
+    `_status` only volunteers suggestions in the evening, because unprompted advice at
+    9am is noise. Asking for them directly is a different thing, so this bypasses the
+    clock gate — but runs the identical `targets.suggest`, so the ranking, the ceiling
+    checks and the arithmetic stay in exactly one place.
+    """
+    conn = get_conn()
+    date = date or get_context().timestamp.date().isoformat()
+    consumed = _day_totals(conn, date)
+    rem = targets.remaining(consumed)
+    return {
+        "date": date,
+        "consumed": consumed,
+        "targets": targets.TARGETS,
+        "remaining": rem,
+        "suggestions": targets.suggest(rem, _catalog_rows(conn)),
+    }
 
 
 # --- catalog listing (backs the deterministic /catalog command; not a Claude tool) ---
@@ -416,8 +451,49 @@ def project_log(conn: sqlite3.Connection, row: dict) -> None:
 # lost on restart, which is fine — the user just re-sends. Last proposal per chat wins.
 _pending: dict[Any, dict] = {}
 
+# Ephemeral per-chat "want to save that to the catalog?" offer, same lifetime rules.
+# Losing it on restart costs nothing: the offer is a convenience, and the food is
+# already logged either way.
+_offer: dict[Any, dict] = {}
 
-def pending_system_context(msg) -> str | None:
+
+def _build_offer(handle: Any, committed) -> list[dict] | None:
+    """After an estimate commits, work out which of its foods aren't saved yet.
+
+    An estimated food is exactly the food worth catalogueing — it cost a round-trip to
+    guess, and guessing it again next week would cost another. The macros offered are the
+    ones just confirmed, stated per the portion eaten, so accepting is one word. The user
+    can also answer with better numbers off a label, which is why the reply asks for
+    whatever the estimate was least sure of.
+    """
+    conn = get_conn()
+    items = [
+        {
+            "name": f["food_name"],
+            "ref_qty": f["amount"],
+            "ref_unit": f["amount_unit"],
+            **{k: round(f[k], 2) for k in _MACROS},
+        }
+        for f in committed
+        if _lookup_catalog(conn, f["food_slug"]) is None
+    ]
+    if not items:
+        _offer.pop(handle, None)
+        return None
+    _offer[handle] = {"items": items}
+    return items
+
+
+def _clear_offer(slug: str) -> None:
+    """Drop a saved food from every chat's standing offer. Keyed by slug rather than by
+    chat because the executor that saves it doesn't know which offer prompted it."""
+    for handle, offer in list(_offer.items()):
+        offer["items"] = [i for i in offer["items"] if _slug(i["name"]) != slug]
+        if not offer["items"]:
+            _offer.pop(handle, None)
+
+
+def _pending_section(msg) -> str | None:
     """Tell Claude this chat has an estimate awaiting confirmation, and exactly what it
     holds. The harness now recalls recent turns (core/history.py), but that transcript is
     lossy for this purpose: it expires, it's capped, and a "yes" may arrive after either
@@ -431,12 +507,83 @@ def pending_system_context(msg) -> str | None:
         f"({r['kcal']:g} kcal, {r['protein_g']:g}g protein)"
         for r in pend["rows"]
     )
+    meal = pend["meal"] or "(no meal named)"
     return (
-        f"PENDING: a {pend['meal']} food estimate is awaiting the user's confirmation — "
+        f"PENDING: a {meal} food estimate is awaiting the user's confirmation — "
         f"{items}. If this message confirms it (e.g. 'yes', 'looks right'), call "
         "confirm_pending. If it amends the estimate, call propose_food_estimate again "
         "with the corrected values."
     )
+
+
+_UNLABELLED_DAYS = 2        # how many recent unlabelled days to spell out
+_UNLABELLED_ITEMS = 8       # per day, before summarising the rest as a count
+
+
+def _unlabelled_section() -> str | None:
+    """Name the food rows still waiting for a meal label, so the answer to "which meal?"
+    lands on a turn that knows what was asked. Bounded: if a question goes unanswered for
+    days this must not grow without limit, and only the recent days are actionable anyway.
+    """
+    rows = get_conn().execute(
+        "SELECT date, food_name, amount, amount_unit FROM food_log "
+        "WHERE meal = ? ORDER BY date DESC, ingested_at",
+        (UNLABELLED_MEAL,),
+    ).fetchall()
+    if not rows:
+        return None
+    by_date: dict[str, list[str]] = {}
+    for r in rows:
+        by_date.setdefault(r["date"], []).append(
+            f"{r['amount']:g}{r['amount_unit']} {r['food_name']}")
+    shown = list(by_date)[:_UNLABELLED_DAYS]
+    days = []
+    for d in shown:
+        items = by_date[d]
+        listed = ", ".join(items[:_UNLABELLED_ITEMS])
+        if len(items) > _UNLABELLED_ITEMS:
+            listed += f", and {len(items) - _UNLABELLED_ITEMS} more"
+        days.append(f"{d}: {listed}")
+    more = len(by_date) - len(shown)
+    tail = f" (plus {more} earlier day{'s' if more > 1 else ''})" if more else ""
+    return (
+        "UNLABELLED: these logged foods are still waiting for a meal — "
+        + "; ".join(days) + tail + ". If this message answers which meal they were "
+        "(even just 'breakfast'), call set_meal with that date and label. If it names a "
+        "meal for only some of them, ask which day you should apply it to rather than "
+        "guessing across days."
+    )
+
+
+def _offer_section(msg) -> str | None:
+    """Carry the standing save-offer, with the exact numbers to save, so "yes" is
+    actionable on a later turn without re-deriving anything."""
+    offer = _offer.get(msg.reply_handle)
+    if not offer:
+        return None
+    items = "; ".join(
+        f"{o['name']} — per {o['ref_qty']:g}{o['ref_unit']}: {o['kcal']:g} kcal, "
+        f"{o['protein_g']:g}g protein, {o['carb_g']:g}g carbs, {o['fat_g']:g}g fat, "
+        f"{o['fibre_g']:g}g fibre"
+        for o in offer["items"]
+    )
+    return (
+        "SAVE OFFER: these were logged as estimates and are NOT in the catalog — "
+        + items + ". If this message agrees to save (e.g. 'yes', 'save it'), call "
+        "save_food with those numbers. If it supplies better ones (off a wrapper or a "
+        "site), save THOSE instead, per whatever portion the user states. If it declines "
+        "or moves on, drop it and don't ask again."
+    )
+
+
+def log_system_context(msg) -> str | None:
+    """The food log's one system-prompt slot, carrying every piece of cross-turn state it
+    needs: an estimate awaiting a "yes", rows awaiting a meal label, and a standing offer
+    to save an estimated food. `Feature` allows a single fragment per feature, so these
+    compose here rather than in the core."""
+    sections = [s for s in (_pending_section(msg), _unlabelled_section(),
+                            _offer_section(msg)) if s]
+    return "\n".join(sections) or None
 
 
 def catalog_system_context(msg) -> str | None:
@@ -524,7 +671,7 @@ LOG_TOOLS = [
             "type": "object",
             "properties": {
                 "date": {"type": "string", "description": "ISO date YYYY-MM-DD. Today if unspecified."},
-                "meal": {"type": "string", "description": "Base meal label: breakfast, lunch, dinner, or snack. If the user names a meal use it; otherwise infer from the current time of day, but use 'snack' for a small/standalone item (a latte, a coffee, a single piece of fruit). Pass the plain base label only — the system numbers repeats itself (breakfast-1, breakfast-2); never send a numbered label."},
+                "meal": {"type": "string", "description": "The meal the user named: breakfast, lunch, dinner, snack — or anything else they call it ('second breakfast'). OMIT this entirely if they did not name one: do NOT guess it from the time of day. An omitted meal logs as 'unlabelled' and you then ask which meal it was. Pass the label exactly as given; repeats are not numbered, so two 'breakfast' messages are one breakfast."},
                 "items": {
                     "type": "array",
                     "items": {
@@ -543,7 +690,7 @@ LOG_TOOLS = [
                     },
                 },
             },
-            "required": ["date", "meal", "items"],
+            "required": ["date", "items"],
         },
     },
     {
@@ -563,7 +710,7 @@ LOG_TOOLS = [
             "type": "object",
             "properties": {
                 "date": {"type": "string", "description": "ISO date YYYY-MM-DD. Today if unspecified."},
-                "meal": {"type": "string", "description": "Base meal label: breakfast, lunch, dinner, or snack. If the user names a meal use it; otherwise infer from the current time of day, but use 'snack' for a small/standalone item (a latte, a coffee, a single piece of fruit). Pass the plain base label only — the system numbers repeats itself (breakfast-1, breakfast-2); never send a numbered label."},
+                "meal": {"type": "string", "description": "The meal the user named: breakfast, lunch, dinner, snack — or anything else they call it ('second breakfast'). OMIT this entirely if they did not name one: do NOT guess it from the time of day. An omitted meal logs as 'unlabelled' and you then ask which meal it was. Pass the label exactly as given; repeats are not numbered, so two 'breakfast' messages are one breakfast."},
                 "items": {
                     "type": "array",
                     "items": {
@@ -580,7 +727,7 @@ LOG_TOOLS = [
                     },
                 },
             },
-            "required": ["date", "meal", "items"],
+            "required": ["date", "items"],
         },
     },
     {
@@ -597,15 +744,30 @@ LOG_TOOLS = [
         "name": "get_day_totals",
         "description": (
             "Return total kcal and macros logged for a day, the user's daily targets (calorie "
-            "ceiling, protein and fibre floors) with how much of each remains, and — in the "
-            "evening — concrete catalog-food `suggestions` to close the day's gaps. Call this "
-            "after logging food (or when the user asks where they're at) so your reply can report "
-            "progress toward all three targets and weave in any suggestions."
+            "and fat ceilings, protein and fibre floors, carbs tracked) with how much of each "
+            "remains, and — in the evening — concrete catalog-food `suggestions` to close the "
+            "day's gaps. Call this after logging food (or when the user asks where they're at) "
+            "so your reply can report progress toward the targets and weave in any suggestions."
         ),
         "input_schema": {
             "type": "object",
             "properties": {"date": {"type": "string", "description": "ISO date YYYY-MM-DD."}},
             "required": ["date"],
+        },
+    },
+    {
+        "name": "suggest_food",
+        "description": (
+            "Answer 'what should I eat?' / 'what's left?' / 'give me something high-protein' at "
+            "ANY time of day. Returns the same `suggestions` structure get_day_totals gives in "
+            "the evening, but without waiting for the evening. Every option is already sized and "
+            "checked against the room left on calories, fat and carbs — report what comes back "
+            "and never work out a portion or a macro total yourself."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"date": {"type": "string", "description": "ISO date YYYY-MM-DD. Defaults to today."}},
+            "required": [],
         },
     },
 ]
@@ -630,10 +792,11 @@ LOG_FEATURE = Feature(
         "propose_food_estimate": propose_food_estimate,
         "confirm_pending": confirm_pending,
         "get_day_totals": get_day_totals,
+        "suggest_food": suggest_food,
     },
     schema=LOG_SCHEMA,
     domain="food_log",
     dedupe_key=("date", "meal", "food_slug", "ingested_at"),
     project=project_log,
-    system_context=pending_system_context,
+    system_context=log_system_context,
 )

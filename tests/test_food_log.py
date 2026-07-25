@@ -117,20 +117,66 @@ def test_relog_adds_a_second_row(ctx, catalog):
     assert out["day_totals"]["kcal"] == pytest.approx(216.0)   # both helpings counted
 
 
-def test_occasion_label_numbers_main_meals(ctx, catalog):
+def test_repeated_meal_label_is_one_meal_not_numbered(ctx, catalog):
+    """A meal is often logged across several messages (the oats, then the coffee). Those
+    used to become lunch-1 and lunch-2, splitting one sitting in two with no way back."""
     ctx()
     _log("banana", 1, "each", meal="lunch")
     _log("banana", 1, "each", meal="lunch")
     meals = {r["meal"] for r in rows(get_conn(), "SELECT meal FROM food_log")}
-    assert meals == {"lunch-1", "lunch-2"}
+    assert meals == {"lunch"}
 
 
-def test_occasion_label_snack_bucket_and_empty(ctx, catalog):
+def test_a_second_sitting_is_whatever_the_user_calls_it(ctx, catalog):
     ctx()
-    _log("banana", 1, "each", meal="latte")                    # non-main label kept as-is
-    _log("banana", 1, "each", meal="")                         # empty -> "snack"
+    _log("banana", 1, "each", meal="breakfast")
+    _log("banana", 1, "each", meal="second breakfast")         # passed through verbatim
     meals = {r["meal"] for r in rows(get_conn(), "SELECT meal FROM food_log")}
-    assert meals == {"latte", "snack"}
+    assert meals == {"breakfast", "second breakfast"}
+
+
+def test_missing_meal_logs_as_unlabelled_and_flags_it(ctx, catalog):
+    """Food is never held hostage to a question: it lands immediately, marked for a label."""
+    ctx()
+    out = food.log_food(DAY, items=[{"name": "banana", "quantity": 1, "unit": "each"}])
+    assert out["meal"] == food.UNLABELLED_MEAL
+    assert out["needs_meal"] is True
+    assert out["day_totals"]["kcal"] == pytest.approx(108.0)    # counted while it waits
+    assert [r["meal"] for r in rows(get_conn(), "SELECT meal FROM food_log")] == ["unlabelled"]
+
+
+def test_blank_meal_is_unlabelled_not_snack(ctx, catalog):
+    ctx()
+    _log("banana", 1, "each", meal="")                         # empty -> unlabelled, never guessed
+    _log("banana", 1, "each", meal="latte")                    # any label kept as-is
+    meals = {r["meal"] for r in rows(get_conn(), "SELECT meal FROM food_log")}
+    assert meals == {"unlabelled", "latte"}
+
+
+def _msg(text="which meal?"):
+    return NormalizedMessage(source="test", reply_handle="chat-1",
+                             timestamp=DEFAULT_TS, text=text)
+
+
+def test_unlabelled_rows_are_named_in_the_system_context(ctx, catalog):
+    """So a bare 'breakfast' next turn lands on a turn that knows what was asked —
+    history is capped and expires, this is not."""
+    ctx()
+    assert food.log_system_context(_msg()) is None              # nothing waiting -> no noise
+    food.log_food(DAY, items=[{"name": "skyr", "quantity": 40, "unit": "g"}])
+
+    frag = food.log_system_context(_msg())
+    assert "UNLABELLED" in frag and "skyr" in frag and DAY in frag
+
+
+def test_unlabelled_context_is_bounded(ctx, catalog):
+    """An unanswered question must not grow the system prompt without limit."""
+    ctx()
+    for day in range(1, 6):                                     # five separate unlabelled days
+        food.log_food(f"2026-07-0{day}", items=[{"name": "skyr", "quantity": 40, "unit": "g"}])
+    frag = food.log_system_context(_msg())
+    assert frag.count("2026-07-0") == food._UNLABELLED_DAYS     # only the recent days spelled out
+    assert "plus 3 earlier days" in frag
 
 
 def test_day_totals_sums_and_frames_targets(ctx, catalog):

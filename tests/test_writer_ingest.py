@@ -10,7 +10,7 @@ from health.features import steps
 from health.store import writer
 from health.store.connection import get_conn
 
-from conftest import rows
+from conftest import log_steps, rows
 
 DAY = "2026-07-14"
 
@@ -22,7 +22,7 @@ def _jsonl(tmp_path, name):
 
 def test_provenance_is_stamped_by_runtime_not_the_tool(ctx):
     ctx(source="telegram", text="9000 steps")
-    row = steps.log_steps(DAY, 9000)                             # tool passes only date+count
+    row = log_steps(DAY, 9000)                             # tool passes only date+count
     assert row["raw"] == "9000 steps"                           # from the in-flight message
     assert row["source"] == "telegram"
     assert row["schema_version"] == 1
@@ -31,7 +31,7 @@ def test_provenance_is_stamped_by_runtime_not_the_tool(ctx):
 
 def test_record_writes_jsonl_projection_and_sidecar(ctx, tmp_path):
     ctx(source="telegram", text="9000 steps")
-    row = steps.log_steps(DAY, 9000)
+    row = log_steps(DAY, 9000)
 
     domain_lines = _jsonl(tmp_path, "steps.jsonl")
     assert domain_lines == [row]                                # system of record
@@ -54,7 +54,7 @@ def test_jsonl_is_written_before_projection(ctx, tmp_path, monkeypatch):
 
     monkeypatch.setattr(steps.FEATURE, "project", boom)          # Feature is a plain dataclass
     with pytest.raises(RuntimeError):
-        steps.log_steps(DAY, 9000)
+        log_steps(DAY, 9000)
 
     assert len(_jsonl(tmp_path, "steps.jsonl")) == 1             # record survives in the system of record
     assert rows(get_conn(), "SELECT * FROM steps") == []        # projection never committed

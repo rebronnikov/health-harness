@@ -14,7 +14,7 @@ from health.core.contracts import NormalizedMessage
 from health.features import corrections, food, steps
 from health.store.connection import get_conn
 
-from conftest import DEFAULT_TS, rows, text_block, tool_block
+from conftest import DEFAULT_TS, log_steps, rows, text_block, tool_block
 
 DAY = "2026-07-14"
 FOOD_KEY = ("date", "meal", "food_slug", "ingested_at")
@@ -76,7 +76,7 @@ def test_explicit_values_win_over_the_rescale(ctx, catalog):
 
 def test_edit_a_scalar_domain(ctx):
     ctx(text="9000 steps")
-    row = steps.log_steps(DAY, 9000)
+    row = log_steps(DAY, 9000)
     ctx(text="that was 9500")
     corrections.edit_entry("steps", {"date": DAY, "source": row["source"]},
                            row["ingested_at"], {"count": 9500})
@@ -111,6 +111,102 @@ def test_delete_removes_the_row_and_day_totals_follow(ctx, catalog):
     assert food.get_day_totals(DAY)["kcal"] == pytest.approx(51.0)
 
 
+# --- set_meal ---------------------------------------------------------------
+
+def _log_unlabelled(name="skyr", qty=100, unit="g", date=DAY):
+    return food.log_food(date, items=[{"name": name, "quantity": qty, "unit": unit}])
+
+
+def test_set_meal_labels_the_days_waiting_rows(ctx, catalog):
+    """The answer to 'which meal?' resolves every row still waiting on that date."""
+    ctx(text="40g skyr")
+    _log_unlabelled(qty=40)
+    ctx(text="and 60g more")
+    _log_unlabelled(qty=60)
+    ctx(text="breakfast")
+    out = corrections.set_meal(DAY, "breakfast")
+
+    assert out["count"] == 2 and out["meal"] == "breakfast"
+    assert {r["meal"] for r in rows(get_conn(), "SELECT meal FROM food_log")} == {"breakfast"}
+
+
+def test_set_meal_leaves_already_labelled_rows_alone(ctx, catalog):
+    ctx()
+    _log_skyr(100, meal="lunch")
+    _log_unlabelled(name="banana", qty=1, unit="each")
+    ctx(text="that was dinner")
+    corrections.set_meal(DAY, "dinner")
+
+    meals = {r["food_slug"]: r["meal"] for r in rows(get_conn(), "SELECT food_slug, meal FROM food_log")}
+    assert meals == {"skyr": "lunch", "banana": "dinner"}
+
+
+def test_set_meal_only_touches_the_named_date(ctx, catalog):
+    ctx()
+    _log_unlabelled(date="2026-07-13")
+    _log_unlabelled(date=DAY)
+    ctx(text="breakfast")
+    corrections.set_meal(DAY, "breakfast")
+
+    got = {r["date"]: r["meal"] for r in rows(get_conn(), "SELECT date, meal FROM food_log")}
+    assert got == {"2026-07-13": "unlabelled", DAY: "breakfast"}
+
+
+def test_set_meal_preserves_ingested_at(ctx, catalog):
+    """The relabel writes a dedupe-key column, so its own pin must survive it."""
+    ctx()
+    (row,) = _log_unlabelled()["logged"]
+    ctx(text="lunch")
+    corrections.set_meal(DAY, "lunch")
+    (stored,) = rows(get_conn(), "SELECT * FROM food_log")
+    assert stored["ingested_at"] == row["ingested_at"]
+
+
+def test_set_meal_pins_the_rows_it_resolved(ctx, catalog, tmp_path):
+    ctx()
+    (row,) = _log_unlabelled()["logged"]
+    ctx(text="lunch")
+    corrections.set_meal(DAY, "lunch")
+
+    (event,) = _jsonl(tmp_path, "corrections")
+    assert event["action"] == "relabel"
+    assert event["target_ingested_at"] == [row["ingested_at"]]   # a set, not a blanket sweep
+    assert event["changes"] == {"meal": "lunch"}
+
+
+def test_set_meal_with_nothing_waiting_raises_and_writes_nothing(ctx, catalog, tmp_path):
+    ctx()
+    _log_skyr(100, meal="lunch")
+    with pytest.raises(ValueError, match="waiting for a meal label"):
+        corrections.set_meal(DAY, "dinner")
+    assert _jsonl(tmp_path, "corrections") == []
+
+
+def test_set_meal_refuses_an_empty_label(ctx, catalog, tmp_path):
+    ctx()
+    _log_unlabelled()
+    with pytest.raises(ValueError, match="is empty"):
+        corrections.set_meal(DAY, "   ")
+    assert _jsonl(tmp_path, "corrections") == []
+
+
+def test_set_meal_is_idempotent(ctx, catalog):
+    """project() must converge if the same event is applied twice — that is what makes a
+    rebuild reproduce live state."""
+    ctx()
+    _log_unlabelled()
+    ctx(text="lunch")
+    corrections.set_meal(DAY, "lunch")
+
+    conn = get_conn()
+    event = {"action": "relabel", "target_domain": "food_log", "target_key": {"date": DAY},
+             "target_ingested_at": [r["ingested_at"] for r in rows(conn, "SELECT * FROM food_log")],
+             "changes": {"meal": "lunch"}}
+    corrections.project(conn, event)
+    corrections.project(conn, event)                             # replay it again: same result
+    assert {r["meal"] for r in rows(conn, "SELECT meal FROM food_log")} == {"lunch"}
+
+
 # --- guards: nothing is written when the call is bad ------------------------
 
 def test_unknown_row_raises_and_writes_nothing(ctx, catalog, tmp_path):
@@ -127,8 +223,8 @@ def test_stale_ingested_at_raises(ctx):
     """The row was overwritten after query_log returned it, so the correction the user is
     describing no longer applies to what's stored."""
     ctx(text="9000 steps")
-    row = steps.log_steps(DAY, 9000)
-    steps.log_steps(DAY, 9200)                                  # re-log -> new ingested_at
+    row = log_steps(DAY, 9000)
+    log_steps(DAY, 9200)                                  # re-log -> new ingested_at
     with pytest.raises(ValueError, match="overwritten"):
         corrections.edit_entry("steps", {"date": DAY, "source": row["source"]},
                                row["ingested_at"], {"count": 9500})
@@ -186,6 +282,33 @@ def test_query_log_filters_by_text_and_date(ctx, catalog):
     only = corrections.query_log("food_log", DAY, DAY, filter_text="banana")["rows"]
     assert [r["food_slug"] for r in only] == ["banana"]
     assert corrections.query_log("food_log", "2026-07-01", "2026-07-02")["rows"] == []
+
+
+def test_the_unlabelled_flow_end_to_end(ctx, catalog, fake_client):
+    """Log without a meal -> the bot asks -> a bare 'breakfast' resolves it. The answer
+    lands on a turn that only knows what the system_context fragment tells it."""
+    fake_client.script(
+        [tool_block("log_food", {"date": DAY,
+                                 "items": [{"name": "skyr", "quantity": 40, "unit": "g"}]})],
+        [text_block("Logged 40g skyr (20 kcal). Which meal was that?")],
+    )
+    first = NormalizedMessage(source="telegram", reply_handle="chat-1",
+                              timestamp=DEFAULT_TS, text="40g skyr")
+    assert "Which meal" in harness.handle(first)
+    assert rows(get_conn(), "SELECT meal FROM food_log") == [{"meal": "unlabelled"}]
+
+    fake_client.script(
+        [tool_block("set_meal", {"date": DAY, "meal": "breakfast"}, id="tu-2")],
+        [text_block("Moved to breakfast.")],
+    )
+    second = NormalizedMessage(source="telegram", reply_handle="chat-1",
+                               timestamp=DEFAULT_TS, text="breakfast")
+    harness.handle(second)
+
+    assert rows(get_conn(), "SELECT meal FROM food_log") == [{"meal": "breakfast"}]
+    # The second turn's prompt named the waiting row — that's what makes a bare
+    # "breakfast" answerable at all.
+    assert "UNLABELLED" in fake_client.calls[2]["system"]
 
 
 # --- the event itself -------------------------------------------------------

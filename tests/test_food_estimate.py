@@ -60,7 +60,69 @@ def test_pending_state_is_per_chat(ctx):
     ctx(text="pizza", reply_handle="c1")
     food.propose_food_estimate(DAY, "dinner", PIZZA)
     other = NormalizedMessage(source="test", reply_handle="c2", timestamp=DEFAULT_TS, text="yes")
-    assert food.pending_system_context(other) is None            # a different chat sees no pending
+    assert food.log_system_context(other) is None                # a different chat sees no pending
     mine = NormalizedMessage(source="test", reply_handle="c1", timestamp=DEFAULT_TS, text="yes")
-    frag = food.pending_system_context(mine)
+    frag = food.log_system_context(mine)
     assert frag is not None and frag.startswith("PENDING:")
+
+
+# --- the offer to save a confirmed estimate ---------------------------------
+
+def _msg(handle="c1", text="yes"):
+    return NormalizedMessage(source="test", reply_handle=handle,
+                             timestamp=DEFAULT_TS, text=text)
+
+
+def _confirm_pizza(ctx):
+    ctx(text="two slices of pizza", reply_handle="c1")
+    food.propose_food_estimate(DAY, "dinner", PIZZA)
+    ctx(text="yes", reply_handle="c1")
+    return food.confirm_pending()
+
+
+def test_confirming_an_estimate_offers_to_save_it(ctx):
+    """The food that cost a round-trip to guess is exactly the one worth remembering."""
+    out = _confirm_pizza(ctx)
+    (offer,) = out["catalog_offer"]
+    assert offer["name"] == "pizza slice"
+    assert offer["ref_qty"] == 2 and offer["ref_unit"] == "each"   # per the portion eaten
+    assert offer["kcal"] == 285 and offer["fibre_g"] == 2
+
+    frag = food.log_system_context(_msg())
+    assert "SAVE OFFER" in frag and "pizza slice" in frag
+
+
+def test_no_offer_for_a_food_already_in_the_catalog(ctx, catalog):
+    ctx(text="some skyr", reply_handle="c1")
+    food.propose_food_estimate(DAY, "snack", [{
+        "name": "skyr", "quantity": 100, "unit": "g",
+        "kcal": 51, "protein_g": 9, "carb_g": 3.4, "fat_g": 0.1, "fibre_g": 0}])
+    ctx(text="yes", reply_handle="c1")
+    assert food.confirm_pending()["catalog_offer"] is None
+    assert "SAVE OFFER" not in (food.log_system_context(_msg()) or "")
+
+
+def test_accepting_the_offer_saves_one_catalog_row_and_clears_it(ctx):
+    _confirm_pizza(ctx)
+    ctx(text="yes save it", reply_handle="c1")
+    food.save_food("pizza slice", 2, "each", 285, 12, 36, 10, 2)
+
+    saved = rows(get_conn(), "SELECT * FROM food_catalog")
+    assert len(saved) == 1 and saved[0]["kcal"] == 285
+    assert "SAVE OFFER" not in (food.log_system_context(_msg()) or "")   # asked and answered
+
+
+def test_better_numbers_replace_the_estimate_when_saving(ctx):
+    _confirm_pizza(ctx)
+    ctx(text="actually the box says 300 kcal per slice", reply_handle="c1")
+    food.save_food("pizza slice", 1, "each", 300, 13, 38, 11, 2.5)
+
+    (saved,) = rows(get_conn(), "SELECT * FROM food_catalog")
+    assert saved["ref_qty"] == 1 and saved["kcal"] == 300         # the label wins over the guess
+
+
+def test_declining_leaves_the_log_alone(ctx):
+    """The offer is a convenience; the food is logged either way."""
+    _confirm_pizza(ctx)
+    assert len(rows(get_conn(), "SELECT * FROM food_log")) == 1
+    assert rows(get_conn(), "SELECT * FROM food_catalog") == []

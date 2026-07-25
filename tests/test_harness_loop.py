@@ -68,9 +68,9 @@ def test_server_tool_blocks_are_never_dispatched_locally(fake_client):
     assert len(fake_client.calls) == 1            # no local tool round-trip was attempted
 
 
-def test_web_search_is_offered_after_the_registry_tools(fake_client):
-    """Registry tools keep a stable prefix; server tools are appended. web_search has no
-    executor by design — the registry never sees it."""
+def test_server_tools_are_offered_after_the_registry_tools(fake_client):
+    """Registry tools keep a stable prefix; server tools are appended. Neither has an
+    executor by design — the registry never sees them."""
     fake_client.script([text_block("ok")])
     harness.handle(_msg("hi"))
 
@@ -78,7 +78,16 @@ def test_web_search_is_offered_after_the_registry_tools(fake_client):
     n = len(harness.SERVER_TOOLS)
     assert tools[-n:] == harness.SERVER_TOOLS
     assert tools[:-n] == all_tools()
-    assert "web_search" not in all_executors()
+    assert {"web_search", "web_fetch"}.isdisjoint(all_executors())
+
+
+def test_search_is_localised_to_the_uk_without_a_hard_allowlist(fake_client):
+    """A UK bias, not a filter: an allowlist would return nothing for a food no UK grocer
+    lists, and the grocers most likely to have it are the ones that block bots."""
+    by_name = {t["name"]: t for t in harness.SERVER_TOOLS}
+    assert by_name["web_search"]["user_location"] == {"type": "approximate", "country": "GB"}
+    assert "allowed_domains" not in by_name["web_search"]
+    assert "web_fetch" in by_name              # search finds it, fetch reads the real table
 
 
 def test_loop_cap_returns_an_honest_reply(fake_client):

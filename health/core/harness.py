@@ -18,6 +18,7 @@ from health.core import history
 from health.core.contracts import NormalizedMessage, current_message
 from health.core.prompts import build_system_prompt
 from health.core.registry import all_executors, all_tools, system_context_fragments
+from health.store import msg_log
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +41,28 @@ MAX_LOOP_ITERATIONS = 12
 # chassis infrastructure (like MODEL), not a feature, and the invariant intact.
 # web_search_20260209 does its own result filtering internally — declaring a separate
 # code_execution tool alongside it would give the model a second execution environment.
-SERVER_TOOLS = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}]
+#
+# `user_location` biases results to UK products, which is the whole point here: a US
+# label for the same branded food carries different numbers. It is a bias, not a filter —
+# `allowed_domains` was considered and rejected, because a hard allowlist silently returns
+# nothing for a food that isn't on a UK grocer's site, and the retailers most likely to
+# have it are also the most likely to block automated access (measured 2026-07-25:
+# Waitrose, Tesco and Sainsbury's all 403 a direct fetch; M&S serves its nutrition table).
+# Search still reaches the blocked retailers through the index, so the ordering lives in
+# the prompt, where it can degrade gracefully instead of failing shut.
+#
+# web_fetch can only retrieve a URL already in the conversation, so the pair works as
+# search -> fetch the promising result -> read the real per-100g table, rather than
+# settling for whatever a snippet happened to include.
+SERVER_TOOLS = [
+    {
+        "type": "web_search_20260209",
+        "name": "web_search",
+        "max_uses": 4,
+        "user_location": {"type": "approximate", "country": "GB"},
+    },
+    {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 3},
+]
 
 FAILSAFE_REPLY = (
     "Something went wrong on my side \N{EM DASH} nothing was logged. "
@@ -55,6 +77,7 @@ LOOP_LIMIT_REPLY = (
 
 def handle(msg: NormalizedMessage) -> str:
     token = current_message.set(msg)         # runtime provenance for every executor this turn
+    msg_log.inbound(msg)                     # transcript: what was said (see store/msg_log.py)
     try:
         system = build_system_prompt(now=msg.timestamp)
         for fragment in system_context_fragments(msg):   # e.g. a pending estimate awaiting "yes"
@@ -97,20 +120,24 @@ def handle(msg: NormalizedMessage) -> str:
                     # stop_reason "refusal"). Never leave the user hanging on an
                     # empty reply, and keep the empty turn out of history.
                     log.warning("no reply text (stop_reason=%r); sending failsafe", stop)
+                    msg_log.outbound(msg, FAILSAFE_REPLY)
                     return FAILSAFE_REPLY
                 history.save(msg, reply)     # text only — never the tool blocks above
+                msg_log.outbound(msg, reply)
                 return reply
 
             results = []
             for tu in tool_uses:
                 try:
                     out = execs[tu.name](**tu.input)
+                    msg_log.tool_call(msg, tu.name, tu.input, result=out)
                     results.append({
                         "type": "tool_result",
                         "tool_use_id": tu.id,
                         "content": json.dumps(out),
                     })
                 except Exception as e:       # surface failures back to the model, don't crash
+                    msg_log.tool_call(msg, tu.name, tu.input, error=f"{type(e).__name__}: {e}")
                     results.append({
                         "type": "tool_result",
                         "tool_use_id": tu.id,
@@ -123,6 +150,7 @@ def handle(msg: NormalizedMessage) -> str:
         # summary of work we can't account for; executors already committed whatever
         # they committed, and the JSONL log is the record of it.
         log.warning("tool loop hit MAX_LOOP_ITERATIONS=%s; giving up", MAX_LOOP_ITERATIONS)
+        msg_log.outbound(msg, LOOP_LIMIT_REPLY)
         return LOOP_LIMIT_REPLY
     finally:
         current_message.reset(token)         # never leak context to the next message

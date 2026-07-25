@@ -6,7 +6,7 @@ from pathlib import Path
 
 import health
 from health import config
-from health.store import connection, writer
+from health.store import connection, msg_log, writer
 from health.store.connection import get_conn
 
 REAL_DATA_DIR = Path(health.__file__).resolve().parent.parent / "data"
@@ -20,6 +20,7 @@ def test_session_config_paths_are_not_the_real_data_dir():
 
 def test_per_test_writes_target_a_tmp_dir(tmp_path):
     assert writer.DATA_DIR == tmp_path                          # isolate fixture redirected it
+    assert msg_log.DATA_DIR == tmp_path                         # ...including the transcript
     assert connection.DB_PATH.parent == tmp_path
     assert REAL_DATA_DIR not in writer.DATA_DIR.parents
 
