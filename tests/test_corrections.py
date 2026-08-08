@@ -14,7 +14,7 @@ from health.core.contracts import NormalizedMessage
 from health.features import corrections, food, steps
 from health.store.connection import get_conn
 
-from conftest import DEFAULT_TS, log_steps, rows, text_block, tool_block
+from conftest import DEFAULT_TS, log_steps, rows, system_text, text_block, tool_block
 
 DAY = "2026-07-14"
 FOOD_KEY = ("date", "meal", "food_slug", "ingested_at")
@@ -308,7 +308,7 @@ def test_the_unlabelled_flow_end_to_end(ctx, catalog, fake_client):
     assert rows(get_conn(), "SELECT meal FROM food_log") == [{"meal": "breakfast"}]
     # The second turn's prompt named the waiting row — that's what makes a bare
     # "breakfast" answerable at all.
-    assert "UNLABELLED" in fake_client.calls[2]["system"]
+    assert "UNLABELLED" in system_text(fake_client.calls[2])
 
 
 # --- the event itself -------------------------------------------------------

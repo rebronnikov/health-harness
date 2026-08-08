@@ -123,28 +123,52 @@ def _command_message(chat_id, text: str) -> NormalizedMessage:
                              timestamp=datetime.now(), text=text)
 
 
-def _entries_window(command: str, args: list[str], today: datetime) -> tuple[dict, str]:
-    """Translate a slash command into recent_entries arguments + a heading.
+def _entries_window(command: str, args: list[str], today: datetime) -> tuple[dict, str, str | None]:
+    """Translate a slash command into recent_entries arguments, a heading, and whether a
+    progress block belongs under the listing ("day", or none).
 
     Deterministic on purpose: /today should cost nothing and never depend on the model
     reading a date correctly. The natural-language route to the same data is the
     recent_entries tool, which Claude calls itself.
+
+    Only the single-day commands get a block. /last N is N arbitrary entries rather than a
+    date window, and /week spans days a single day's totals can't describe.
     """
     if command == "yesterday":
         day = (today.date() - timedelta(days=1)).isoformat()
-        return {"days": 1, "end_date": day, "limit": 50}, f"Yesterday ({day})"
+        return {"days": 1, "end_date": day, "limit": 50}, f"Yesterday ({day})", "day"
     if command == "week":
-        return {"days": 7, "limit": 50}, "Last 7 days"
+        return {"days": 7, "limit": 50}, "Last 7 days", None
     if command == "last":
         n = 5
         if args and args[0].lstrip("-").isdigit():
             n = max(1, min(int(args[0]), 50))
-        return {"days": 30, "limit": n}, f"Last {n} entries"
-    return {"days": 1, "limit": 50}, f"Today ({today.date().isoformat()})"
+        return {"days": 30, "limit": n}, f"Last {n} entries", None
+    return {"days": 1, "limit": 50}, f"Today ({today.date().isoformat()})", "day"
 
 
-def render_entries(heading: str, listing: dict) -> str:
-    """The numbered list the user reads and then points at ("delete 2")."""
+def _progress_block(kind: str | None, listing: dict) -> str | None:
+    """The standard totals block for the day the listing actually covered.
+
+    The date comes off the listing rather than being recomputed here, so the block can
+    never describe a different day from the rows printed above it.
+    """
+    if kind == "day":
+        return food.get_day_totals(listing["end_date"])["progress_block"]
+    return None
+
+
+def _list_and_total(kwargs: dict, kind: str | None) -> tuple[dict, str | None]:
+    # Both reads in the one worker thread: they share the bound message context, and
+    # neither should run on the event loop.
+    listing = corrections.recent_entries(**kwargs)
+    return listing, _progress_block(kind, listing)
+
+
+def render_entries(heading: str, listing: dict, progress: str | None = None) -> str:
+    """The numbered list the user reads and then points at ("delete 2"), with the standard
+    progress block under it. Nothing logged means no block — a row of zeros against the
+    targets says less than "Nothing logged." already does."""
     entries = listing["entries"]
     if not entries:
         return f"{heading}\n\nNothing logged."
@@ -152,6 +176,8 @@ def render_entries(heading: str, listing: dict) -> str:
     lines += [f"{e['n']}. {e['summary']}" for e in entries]
     if listing["truncated"]:
         lines.append(f"\n(showing {len(entries)} of {listing['total_in_range']})")
+    if progress:
+        lines.append(f"\n{progress}")
     lines.append("\nSay e.g. “delete 2” or “3 was 40g” to fix one.")
     return "\n".join(lines)
 
@@ -167,13 +193,13 @@ async def _on_entries(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     msg = _command_message(chat.id, text)
     msg_log.inbound(msg)
     try:
-        kwargs, heading = _entries_window(command, ctx.args or [], msg.timestamp)
+        kwargs, heading, kind = _entries_window(command, ctx.args or [], msg.timestamp)
         token = current_message.set(msg)
         try:
-            listing = await asyncio.to_thread(corrections.recent_entries, **kwargs)
+            listing, progress = await asyncio.to_thread(_list_and_total, kwargs, kind)
         finally:
             current_message.reset(token)
-        reply = render_entries(heading, listing)
+        reply = render_entries(heading, listing, progress)
         msg_log.outbound(msg, reply)
         for part in split_reply(reply):
             await ctx.bot.send_message(chat_id=chat.id, text=part)

@@ -149,3 +149,4 @@ def test_harness_routes_a_week_question_to_get_summary(ctx, catalog, fake_client
                                              timestamp=DEFAULT_TS, text="how was my week?"))
     assert reply.startswith("Averaging")
     assert fake_client.calls[0]["messages"][0]["content"] == "how was my week?"
+

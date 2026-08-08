@@ -87,10 +87,16 @@ INGREDIENTS: list[dict] = [
      "kcal": 36, "protein_g": 0.7, "carb_g": 7.3, "fat_g": 0, "fibre_g": 1.2,
      "notes": "typical serving 50g"},
     # per banana = per-100g * 1.2 (1 medium banana ~= 120g peeled).
+    # Fibre is the one figure NOT off the Waitrose label, which omits it — read literally
+    # that would make bananas a zero-fibre food. 1.4g/100g is
+    # the UK value: M&S publish it against an identical 1.2/20.3/0.1 panel, and McCance &
+    # Widdowson 2015 agrees. USDA's 2.6g/100g is a different measurement basis and would
+    # make this the only non-UK-label item in a catalog the fibre floor is judged against.
     {"name": "banana", "ref_qty": 1, "ref_unit": "each",
-     "kcal": 108, "protein_g": 1.44, "carb_g": 24.4, "fat_g": 0.12, "fibre_g": 0,
-     "notes": ("bananas; 1 banana ~= 120g peeled; label lists "
-               "no fibre; per 100g: 90 kcal, 1.2g protein, 20.3g carb, 0.1g fat")},
+     "kcal": 108, "protein_g": 1.44, "carb_g": 24.4, "fat_g": 0.12, "fibre_g": 1.68,
+     "notes": ("bananas; 1 banana ~= 120g peeled; per 100g: 90 kcal, "
+               "1.2g protein, 20.3g carb, 0.1g fat, 1.4g fibre (fibre from the M&S "
+               "Rainforest Alliance panel + McCance & Widdowson 2015 — the label omits it)")},
     # per egg = per-100g * 0.5 (1 medium egg ~= 58g whole, ~50g edible).
     {"name": "eggs", "ref_qty": 1, "ref_unit": "each",
      "kcal": 71.5, "protein_g": 7.05, "carb_g": 0, "fat_g": 4.8, "fibre_g": 0,

@@ -134,16 +134,24 @@ def _catalog_rows(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _status(consumed: dict, date: str) -> dict:
+def _status(consumed: dict, date: str, heading: str = targets.DAY_HEADING) -> dict:
     """Enrich consumed sums with targets + remaining, and — only in the evening, for
     today — deterministic catalog suggestions to close the day's gaps. The time gate
-    reads the in-flight message timestamp so Claude never reasons about the clock."""
+    reads the in-flight message timestamp so Claude never reasons about the clock.
+
+    `progress_block` and `suggestions_block` are the finished, standard-shape texts the
+    reply reproduces verbatim; the structured `remaining`/`suggestions` stay alongside them
+    for the suggestion math and for anything the reply still words itself (the off-catalog
+    licence).
+    """
     out = {**consumed, "targets": targets.TARGETS, "remaining": targets.remaining(consumed)}
+    out["progress_block"] = targets.render_progress(out["remaining"], heading)
     now = get_context().timestamp
     if date == now.date().isoformat() and now.hour >= targets.SUGGEST_AFTER_HOUR:
         suggestions = targets.suggest(out["remaining"], _catalog_rows(get_conn()))
         if suggestions:
             out["suggestions"] = suggestions
+            out["suggestions_block"] = targets.render_suggestions(suggestions)
     return out
 
 
@@ -296,7 +304,10 @@ def propose_food_estimate(date: str, meal: str | None = None,
         "date": date,
         **{k: round(current[k] + sum(r[k] for r in rows), 1) for k in _MACROS},
     }
-    return {"pending": rows, "projected_day_totals": _status(projected, date),
+    # A projection is not a log — the heading says so, so the block can't be mistaken for
+    # what has actually been written.
+    return {"pending": rows,
+            "projected_day_totals": _status(projected, date, heading="Would put today at"),
             "needs_confirmation": True}
 
 
@@ -356,13 +367,22 @@ def suggest_food(date: str | None = None) -> dict:
     date = date or get_context().timestamp.date().isoformat()
     consumed = _day_totals(conn, date)
     rem = targets.remaining(consumed)
-    return {
+    suggestions = targets.suggest(rem, _catalog_rows(conn))
+    out = {
         "date": date,
         "consumed": consumed,
         "targets": targets.TARGETS,
         "remaining": rem,
-        "suggestions": targets.suggest(rem, _catalog_rows(conn)),
+        # Same block as every other reply: asking "what should I eat?" is a different
+        # question from "what have I eaten?", but it is answered against the same day.
+        "progress_block": targets.render_progress(rem),
+        "suggestions": suggestions,
     }
+    # Unlike `_status`, this bypasses the clock gate — so `suggest` may legitimately come
+    # back with nothing to say (both floors met, no calorie room) and there is no block.
+    if suggestions:
+        out["suggestions_block"] = targets.render_suggestions(suggestions)
+    return out
 
 
 # --- catalog listing (backs the deterministic /catalog command; not a Claude tool) ---
@@ -457,23 +477,44 @@ _pending: dict[Any, dict] = {}
 _offer: dict[Any, dict] = {}
 
 
+# What a saved food should be stored per, by unit: weighed foods per 100 g/ml, counted
+# foods per one. Anything else keeps the eaten amount.
+_OFFER_REF_QTY = {"g": 100.0, "ml": 100.0, "each": 1.0}
+
+
+def _offer_item(f: dict) -> dict:
+    """Restate one committed food per the catalog's reference portion.
+
+    The estimate is confirmed against what was eaten (150 g of mince, 2 slices of pizza),
+    but that is a serving, not a reference: saved verbatim it fills the catalog with rows
+    reading "per 150 g" and "per 2 each". Scaling downstream is proportional either way —
+    this is so the catalog listing and the SAVE OFFER fragment read alike.
+    """
+    amount = f["amount"]
+    ref_qty = _OFFER_REF_QTY.get(f["amount_unit"], amount)
+    # A zero or negative amount can't be scaled; offer it as-is rather than divide by it.
+    factor = ref_qty / amount if amount > 0 else 1.0
+    if factor == 1.0:
+        ref_qty = amount
+    return {
+        "name": f["food_name"],
+        "ref_qty": ref_qty,
+        "ref_unit": f["amount_unit"],
+        **{k: round(f[k] * factor, 2) for k in _MACROS},
+    }
+
+
 def _build_offer(handle: Any, committed) -> list[dict] | None:
     """After an estimate commits, work out which of its foods aren't saved yet.
 
     An estimated food is exactly the food worth catalogueing — it cost a round-trip to
     guess, and guessing it again next week would cost another. The macros offered are the
-    ones just confirmed, stated per the portion eaten, so accepting is one word. The user
-    can also answer with better numbers off a label, which is why the reply asks for
-    whatever the estimate was least sure of.
+    ones just confirmed, restated per the catalog's own reference portion, so accepting is
+    one word. The user can also answer with better numbers off a label.
     """
     conn = get_conn()
     items = [
-        {
-            "name": f["food_name"],
-            "ref_qty": f["amount"],
-            "ref_unit": f["amount_unit"],
-            **{k: round(f[k], 2) for k in _MACROS},
-        }
+        _offer_item(f)
         for f in committed
         if _lookup_catalog(conn, f["food_slug"]) is None
     ]
@@ -745,9 +786,10 @@ LOG_TOOLS = [
         "description": (
             "Return total kcal and macros logged for a day, the user's daily targets (calorie "
             "and fat ceilings, protein and fibre floors, carbs tracked) with how much of each "
-            "remains, and — in the evening — concrete catalog-food `suggestions` to close the "
-            "day's gaps. Call this after logging food (or when the user asks where they're at) "
-            "so your reply can report progress toward the targets and weave in any suggestions."
+            "remains, and — in the evening — concrete catalog-food suggestions to close the "
+            "day's gaps. Call this after logging food (or when the user asks where they're at). "
+            "`progress_block` and `suggestions_block` come back already written out; your reply "
+            "reproduces them verbatim rather than rephrasing the numbers."
         ),
         "input_schema": {
             "type": "object",
@@ -759,10 +801,10 @@ LOG_TOOLS = [
         "name": "suggest_food",
         "description": (
             "Answer 'what should I eat?' / 'what's left?' / 'give me something high-protein' at "
-            "ANY time of day. Returns the same `suggestions` structure get_day_totals gives in "
-            "the evening, but without waiting for the evening. Every option is already sized and "
-            "checked against the room left on calories, fat and carbs — report what comes back "
-            "and never work out a portion or a macro total yourself."
+            "ANY time of day. Returns the same `suggestions_block` get_day_totals gives in the "
+            "evening, but without waiting for the evening. Every option is already sized and "
+            "checked against the room left on calories, fat and carbs — reproduce the block as "
+            "given and never work out a portion or a macro total yourself."
         ),
         "input_schema": {
             "type": "object",

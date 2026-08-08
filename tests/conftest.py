@@ -140,6 +140,24 @@ def raw_block(type_, **attrs):
     return _Block(type_, **attrs)
 
 
+def usage_block(input_tokens=0, output_tokens=0,
+                cache_creation_input_tokens=0, cache_read_input_tokens=0):
+    """The `usage` object every real response carries. Zeroed by default so a test that
+    doesn't care about cost still exercises the recording path; pass real counts to assert
+    on the cache telemetry."""
+    return _Block("usage", input_tokens=input_tokens, output_tokens=output_tokens,
+                  cache_creation_input_tokens=cache_creation_input_tokens,
+                  cache_read_input_tokens=cache_read_input_tokens,
+                  cache_creation=None, server_tool_use=None)
+
+
+def system_text(call) -> str:
+    """Flatten a recorded request's system blocks into one string. The harness sends two —
+    a cached static block and a volatile one — so an assertion about prompt *content*
+    shouldn't have to care which block a phrase landed in."""
+    return "\n".join(b["text"] for b in call["system"])
+
+
 class FakeAnthropic:
     """Scripted Anthropic client: returns queued responses and records every request.
     `calls[i]["messages"]` is what makes the harness's context assembly assertable."""
@@ -150,8 +168,11 @@ class FakeAnthropic:
         self.messages = self
 
     def script(self, *blocks_per_response):
-        """Queue one response per argument; each argument is a list of content blocks,
-        or a (blocks, stop_reason) tuple when a non-default stop_reason matters."""
+        """Queue one response per argument; each argument is a list of content blocks, or a
+        (blocks, stop_reason) / (blocks, stop_reason, container_id) /
+        (blocks, stop_reason, container_id, usage) tuple when a non-default stop_reason, a
+        server-side container, or specific token counts matter. An explicit `None` in the
+        usage slot models a response that carries no usage at all."""
         self.responses.extend(blocks_per_response)
 
     def create(self, **kwargs):
@@ -161,8 +182,20 @@ class FakeAnthropic:
         if not self.responses:
             raise AssertionError("FakeAnthropic ran out of scripted responses")
         scripted = self.responses.pop(0)
-        blocks, stop_reason = scripted if isinstance(scripted, tuple) else (scripted, "end_turn")
-        return _Block("message", content=blocks, stop_reason=stop_reason)
+        if not isinstance(scripted, tuple):
+            scripted = (scripted,)
+        # Explicit length checks, not tuple padding: padding can't express "slot present
+        # but None", which is exactly what the no-usage case needs.
+        blocks = scripted[0]
+        stop_reason = scripted[1] if len(scripted) > 1 else None
+        container = scripted[2] if len(scripted) > 2 else None
+        usage = scripted[3] if len(scripted) > 3 else usage_block()
+        return _Block("message", content=blocks,
+                      stop_reason=stop_reason or "end_turn",
+                      # Real responses carry no `container` unless a container-backed
+                      # server tool ran; None models that.
+                      container=_Block("container", id=container) if container else None,
+                      usage=usage)
 
 
 @pytest.fixture

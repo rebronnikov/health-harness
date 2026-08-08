@@ -163,21 +163,24 @@ def test_query_log_limit_is_honoured_and_capped(ctx, catalog):
 
 # --- the deterministic slash commands ---------------------------------------
 
-@pytest.mark.parametrize("command,args,expected_days,expected_end", [
-    ("today", [], 1, None),
-    ("yesterday", [], 1, YESTERDAY),
-    ("week", [], 7, None),
-    ("last", ["3"], 30, None),
+@pytest.mark.parametrize("command,args,expected_days,expected_end,expected_kind", [
+    ("today", [], 1, None, "day"),
+    ("yesterday", [], 1, YESTERDAY, "day"),
+    # A week spans days a single day's totals can't describe, so no block.
+    ("week", [], 7, None, None),
+    # N arbitrary entries is not a date window, so no totals block belongs under it.
+    ("last", ["3"], 30, None, None),
 ])
-def test_slash_command_windows(command, args, expected_days, expected_end):
-    kwargs, heading = tg._entries_window(command, args, DEFAULT_TS)
+def test_slash_command_windows(command, args, expected_days, expected_end, expected_kind):
+    kwargs, heading, kind = tg._entries_window(command, args, DEFAULT_TS)
     assert kwargs["days"] == expected_days
     assert kwargs.get("end_date") == expected_end
+    assert kind == expected_kind
     assert heading
 
 
 def test_last_command_limit_comes_from_the_argument():
-    kwargs, heading = tg._entries_window("last", ["3"], DEFAULT_TS)
+    kwargs, heading, _ = tg._entries_window("last", ["3"], DEFAULT_TS)
     assert kwargs["limit"] == 3 and heading == "Last 3 entries"
     assert tg._entries_window("last", [], DEFAULT_TS)[0]["limit"] == 5      # default
     assert tg._entries_window("last", ["999"], DEFAULT_TS)[0]["limit"] == 50  # capped
@@ -196,3 +199,36 @@ def test_render_entries_numbers_the_lines(ctx, catalog):
 def test_render_entries_when_nothing_is_logged(ctx, catalog):
     ctx(text="/today")
     assert "Nothing logged." in tg.render_entries("Today", corrections.recent_entries())
+
+
+def test_the_listing_carries_the_standard_progress_block(ctx, catalog):
+    """/today used to print rows and no totals at all. The block goes below the numbered
+    list and above the "delete 2" affordance, so the numbering stays next to the rows."""
+    _seed_a_mixed_day(ctx)
+    ctx(text="/today")
+    listing = corrections.recent_entries()
+    block = tg._progress_block("day", listing)
+    text = tg.render_entries("Today", listing, block)
+
+    assert block.startswith("Today so far\n")
+    assert text.index("4. steps: 9000") < text.index("Today so far") < text.index("delete 2")
+
+
+def test_the_block_describes_the_day_the_listing_covered(ctx, catalog):
+    """The date comes off the listing, never recomputed — a block that described a
+    different day from the rows above it would be worse than no block."""
+    ctx(text="yesterday's food")
+    food.log_food(YESTERDAY, "lunch", [{"name": "banana", "quantity": 1, "unit": "each"}])
+    _seed_a_mixed_day(ctx)
+
+    ctx(text="/yesterday")
+    yday = corrections.recent_entries(days=1, end_date=YESTERDAY)
+    assert "🔥 Calories: 108 / 2200" in tg._progress_block("day", yday)   # not today's 20.4
+
+
+def test_no_block_for_an_arbitrary_number_of_entries(ctx, catalog):
+    _seed_a_mixed_day(ctx)
+    ctx(text="/last 3")
+    listing = corrections.recent_entries(limit=3)
+    assert tg._progress_block(None, listing) is None
+    assert "Today so far" not in tg.render_entries("Last 3 entries", listing, None)

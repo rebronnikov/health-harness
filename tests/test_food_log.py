@@ -188,6 +188,20 @@ def test_day_totals_sums_and_frames_targets(ctx, catalog):
     assert totals["remaining"]["protein_g"]["direction"] == "floor"
 
 
+def test_every_food_result_carries_the_finished_progress_block(ctx, catalog):
+    """The reply's wording is rendered here, not composed by the model — so a result that
+    reports the day must hand back the block, whichever executor produced it."""
+    ctx()
+    logged = _log("banana", 2, "each", meal="snack")
+    expected = "🔥 Calories: 216 / 2200 (1984 left)"
+    assert expected in logged["day_totals"]["progress_block"]
+    assert expected in food.get_day_totals(DAY)["progress_block"]
+    assert expected in food.suggest_food(DAY)["progress_block"]
+    assert logged["day_totals"]["progress_block"].startswith("Today so far\n")
+    # ...and the suggestion list is rendered the same way, wherever it comes from.
+    assert food.suggest_food(DAY)["suggestions_block"].startswith("To close the gaps\n")
+
+
 def test_macros_ref_qty_scales_user_macros(ctx, catalog):
     ctx()
     (logged,) = food.log_food(DAY, "breakfast", [{

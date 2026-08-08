@@ -70,6 +70,154 @@ def test_remaining_fat_is_a_ceiling():
     assert _remaining(fat_g=90)["fat_g"]["remaining"] == pytest.approx(-20.0)
 
 
+# --- render_progress(): the one standard shape every reply reports the day in -----
+
+def test_progress_block_shape_and_row_order():
+    """The same inputs always render with the same wording and order."""
+    block = targets.render_progress(
+        _remaining(kcal=1846, protein_g=29, carb_g=17, fat_g=29, fibre_g=0))
+    assert block == (
+        "Today so far\n"
+        "🔥 Calories: 1846 / 2200 (354 left)\n"
+        "🥩 Protein: 29g / 150g (121g left)\n"
+        "🍞 Carbs: 17g / 250g (233g left)\n"
+        "🥑 Fat: 29g / 70g (41g left)\n"
+        "🌾 Fibre: 0g / 28g (28g left)"
+    )
+
+
+def test_progress_block_takes_a_heading():
+    block = targets.render_progress(_remaining(kcal=100), heading="Would put today at")
+    assert block.startswith("Would put today at\n🔥 Calories: 100 / 2200 (2100 left)")
+
+
+def test_progress_block_delta_wording_by_direction():
+    """Under target is "left" on every row so the lines read alike; past target splits,
+    because a breached ceiling is a problem and an exceeded floor is the point."""
+    rows = dict(
+        line.split(": ", 1) for line in
+        targets.render_progress(
+            _remaining(kcal=2400, protein_g=175, carb_g=259, fat_g=80, fibre_g=28)
+        ).split("\n")[1:]
+    )
+    assert rows["🔥 Calories"] == "2400 / 2200 (200 over)"      # ceiling breached
+    assert rows["🥑 Fat"] == "80g / 70g (10g over)"              # ceiling breached
+    assert rows["🍞 Carbs"] == "259g / 250g (9g over)"         # tracked, named neutrally
+    assert rows["🥩 Protein"] == "175g / 150g (met)"            # floor exceeded
+    assert rows["🌾 Fibre"] == "28g / 28g (met)"                # floor exactly hit
+
+
+def test_progress_block_lines_add_up():
+    """Rounded to whole units, with the delta taken from the rounded pair — a block built
+    to be scanned can't print "25g / 28g (3.4g left)"."""
+    block = targets.render_progress(_remaining(fibre_g=24.6, fat_g=66.7))
+    assert "🌾 Fibre: 25g / 28g (3g left)" in block
+    assert "🥑 Fat: 67g / 70g (3g left)" in block
+
+
+def test_progress_block_covers_every_target():
+    """A target with no row would silently stop being reported."""
+    keyed = {key for _, key, _ in targets.PROGRESS_ROWS}
+    assert keyed == set(targets.TARGETS)
+
+
+def test_every_row_is_labelled_with_an_icon():
+    """The icons are the reason a macro is findable at a glance; a row that lost one would
+    read as a different kind of line."""
+    for label, _, _ in targets.PROGRESS_ROWS:
+        icon, _, name = label.partition(" ")
+        assert not icon.isascii() and name.isalpha()
+
+
+# --- render_suggestions(): the same treatment for the "what to eat" list ----------
+
+def test_suggestions_block_shape():
+    """Fitting picks under one fixed heading, one line each. The model used to format
+    these itself and invented a fresh heading every time ("Ideas to close the gaps:",
+    "Some options to hit your protein:") off identical data."""
+    rem = _remaining(kcal=1000, protein_g=100, fibre_g=10)         # both floors unmet
+    block = targets.render_suggestions(targets.suggest(rem, CATALOG))
+    assert block == (
+        "To close the gaps\n"
+        "🥩 skyr — 210g (~19g protein)\n"
+        "🥩 lentils — 200g (~18g protein)\n"
+        "🥩 chocolate — 25g (~2g protein)\n"
+        "🌾 bran — 30g (~3g fibre)"
+    )
+
+
+def test_suggestions_block_counts_each_foods_instead_of_weighing_them():
+    """An `each` food takes its count in front of the name and NO noun — the catalog never
+    recorded whether one is a can, a fillet or a slice, and inventing the word is the drift
+    the block exists to stop."""
+    tuna = {"name": "tuna", "ref_qty": 1, "ref_unit": "each", "kcal": 110,
+            "protein_g": 25, "carb_g": 0, "fat_g": 1, "fibre_g": 0, "notes": ""}
+    rem = _remaining(kcal=1000, protein_g=100, fibre_g=26)
+    block = targets.render_suggestions(targets.suggest(rem, [tuna]))
+    assert "🥩 1× tuna (~25g protein)" in block
+
+
+def test_suggestions_block_names_the_breach_on_the_line():
+    """"Closes protein but puts you past fat" is the user's call to make, so the overshoot
+    rides on the pick itself and the fitting/breaching split is never collapsed."""
+    rem = _remaining(kcal=1000, protein_g=100, fat_g=65, fibre_g=26)   # 5g of fat room
+    block = targets.render_suggestions(targets.suggest(rem, [SKYR, NUTS]))
+    assert block == (
+        "To close the gaps\n"
+        "🥩 skyr — 210g (~19g protein)\n"
+        "\n"
+        "Doesn't quite fit\n"
+        "🥩 nuts — 30g (~6g protein, 10g past fat)"
+    )
+
+
+def test_suggestions_block_joins_a_two_macro_breach():
+    rem = _remaining(kcal=2150, protein_g=100, fat_g=65, fibre_g=26)   # 50 kcal AND 5g fat left
+    block = targets.render_suggestions(targets.suggest(rem, [NUTS]))
+    assert "130 past calories and 10g past fat" in block               # _ROOM_MACROS order
+
+
+def test_suggestions_block_with_nothing_fitting_keeps_the_caveat():
+    """No fitting picks must not mean the breaching ones get promoted to a clean
+    recommendation under "To close the gaps"."""
+    rem = _remaining(kcal=1000, protein_g=100, fat_g=65, fibre_g=26)
+    block = targets.render_suggestions(targets.suggest(rem, [NUTS]))
+    assert block.startswith("Doesn't quite fit\n🥩 nuts — 30g")
+
+
+def test_suggestions_block_treat_mode_prints_the_cost():
+    """A treat closes no gap — both floors were met to get here — so `_treat_picks` sets no
+    `covers_g` and the calorie cost is the only number worth printing."""
+    rem = _remaining(kcal=1000, protein_g=148, fibre_g=26)
+    block = targets.render_suggestions(targets.suggest(rem, CATALOG))
+    assert block.startswith("Room for a treat\n")
+    assert "🔥 chocolate — 25g (~134 kcal)" in block
+
+
+def test_suggestions_block_over_budget_heading_carries_the_caveat():
+    """Past the ceiling, nothing fits by construction — so the heading says so once
+    instead of every pick sitting under "Doesn't quite fit"."""
+    rem = _remaining(kcal=2500, protein_g=100, fibre_g=26)
+    block = targets.render_suggestions(targets.suggest(rem, CATALOG))
+    assert block.startswith("Already past the calorie ceiling — the leanest options\n")
+    assert targets.OVER_HEADING not in block
+
+
+def test_suggestion_icons_and_words_come_from_the_progress_rows():
+    """Derived, not re-typed: renaming a macro or swapping an icon in PROGRESS_ROWS has to
+    move both blocks at once, or the two halves of one reply start disagreeing."""
+    assert {key for _, key, _ in targets.PROGRESS_ROWS} == set(targets._MACRO_WORDS)
+    for label, key, unit in targets.PROGRESS_ROWS:
+        icon, word, u = targets._MACRO_WORDS[key]
+        assert label == f"{icon} {word.capitalize()}" and u == unit
+
+
+def test_suggestion_numbers_never_round_down_to_zero():
+    """A breach that printed "0g past fat" would read as "it fits"."""
+    assert targets._at_least_one(0.04) == 1
+    assert targets._at_least_one(25.4) == 25
+
+
 # --- suggest() modes ------------------------------------------------------------
 
 def test_suggest_protein_only_mode():

@@ -68,6 +68,31 @@ def test_server_tool_blocks_are_never_dispatched_locally(fake_client):
     assert len(fake_client.calls) == 1            # no local tool round-trip was attempted
 
 
+def test_a_container_backed_turn_carries_its_container_id(fake_client):
+    paused = [raw_block("server_tool_use", id="srv-1", name="web_search", input={"query": "x"})]
+    fake_client.script(
+        (paused, "pause_turn", "cntr-1"),
+        [tool_block("get_day_totals", {"date": DAY})],
+        [text_block("~188 kcal for 150g.")],
+    )
+
+    reply = harness.handle(_msg("150g beef mince, look up Waitrose"))
+
+    assert reply == "~188 kcal for 150g."
+    # The search's own request can't know the id yet; every request after it must.
+    assert "container" not in fake_client.calls[0]
+    assert [c["container"] for c in fake_client.calls[1:]] == ["cntr-1", "cntr-1"]
+
+
+def test_a_turn_without_a_server_tool_sends_no_container(fake_client):
+    """The key is absent, not None: a turn that never searched has no container to resume,
+    and the API rejects an unknown one."""
+    fake_client.script([tool_block("get_day_totals", {"date": DAY})], [text_block("ok")])
+    harness.handle(_msg("how am I doing?"))
+
+    assert all("container" not in c for c in fake_client.calls)
+
+
 def test_server_tools_are_offered_after_the_registry_tools(fake_client):
     """Registry tools keep a stable prefix; server tools are appended. Neither has an
     executor by design — the registry never sees them."""

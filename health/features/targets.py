@@ -76,6 +76,54 @@ def remaining(consumed: dict) -> dict:
     }
 
 
+# --- the standard progress block ----------------------------------------------
+# One fixed shape for reporting a day against the targets. It is rendered here,
+# deterministically, rather than phrased by the model: narrating `remaining()` drifted
+# differently between replies, making results difficult to compare.
+PROGRESS_ROWS = (
+    ("🔥 Calories", "kcal", ""),        # nutrition-label order
+    ("🥩 Protein", "protein_g", "g"),
+    ("🍞 Carbs", "carb_g", "g"),
+    ("🥑 Fat", "fat_g", "g"),
+    ("🌾 Fibre", "fibre_g", "g"),
+)
+
+DAY_HEADING = "Today so far"
+
+
+def render_progress(rem: dict, heading: str = DAY_HEADING) -> str:
+    """`Label: consumed / target (delta)`, one line per macro under a heading.
+
+    Everything is rounded to whole units and the delta is derived from that rounded pair,
+    so the three numbers on a line always add up — a block built to be scanned can't
+    afford "25g / 28g (3.4g left)". Per-portion macros still get a decimal below 10 (see
+    `food.render_catalog_table`), where 0.4g is a big relative error; a daily total is not.
+
+    Under target reads "left" on every row — room left on a ceiling, still to eat on a
+    floor, distance to the number on carbs — so one word covers all three directions and
+    every line parses the same way. Past target is where they split: a breached ceiling
+    (or carb target) names the overshoot, a floor just says "met", since exceeding a floor
+    is what a floor is for.
+    """
+    lines = [heading]
+    for label, key, unit in PROGRESS_ROWS:
+        r = rem[key]
+        consumed, target = round(r["consumed"]), round(r["target"])
+        lines.append(
+            f"{label}: {consumed}{unit} / {target}{unit} "
+            f"({_delta(target - consumed, unit, r['direction'])})"
+        )
+    return "\n".join(lines)
+
+
+def _delta(left: int, unit: str, direction: str) -> str:
+    """The parenthesised part of a row. `left` is target - consumed, so a positive value
+    means short of the target and a negative one means past it."""
+    if direction == "floor":
+        return "met" if left <= 0 else f"{left}{unit} left"
+    return f"{left}{unit} left" if left >= 0 else f"{-left}{unit} over"
+
+
 def suggest(rem: dict, catalog: list[dict]) -> dict | None:
     """Pick catalog foods to close today's gaps, as a menu of realistic single-serving
     options split by whether they still fit inside the day's ceilings.
@@ -119,6 +167,106 @@ def suggest(rem: dict, catalog: list[dict]) -> dict | None:
         if tpicks:
             return _split("treat", tpicks, room, off_catalog=False)
     return None
+
+
+# --- the standard suggestions block --------------------------------------------
+# The other half of `render_progress`: `suggest()` already does the arithmetic, so the
+# reply has nothing left to decide but wording — which is exactly what drifts. The model
+# used to format these bullets itself from the raw dict and invented a fresh heading each
+# time ("Ideas to close the gaps:", "Some options to hit your protein:"). Rendered here,
+# the list reads the same every evening and the prompt only echoes it.
+#
+# `off_catalog_ok` is deliberately NOT rendered: those picks are named from the model's own
+# knowledge, carry no macros, and can't come out of a catalog-shaped renderer.
+SUGGEST_HEADINGS = {
+    "treat": "Room for a treat",
+    # Nothing fits by construction here, so the heading carries the caveat itself rather
+    # than leaving every pick to sit under "Doesn't quite fit".
+    "over_budget": "Already past the calorie ceiling — the leanest options",
+}
+DEFAULT_SUGGEST_HEADING = "To close the gaps"
+OVER_HEADING = "Doesn't quite fit"
+
+# Icon, plain word and unit per macro, derived from PROGRESS_ROWS so the two blocks can
+# never disagree about what fibre is called or which icon it wears — editing that one
+# constant still moves everything.
+_MACRO_WORDS = {
+    key: (label.partition(" ")[0], label.partition(" ")[2].lower(), unit)
+    for label, key, unit in PROGRESS_ROWS
+}
+# What a pick's `closes` tag reports against. A treat closes no gap; it spends calories.
+_CLOSES_MACRO = {"protein": "protein_g", "fibre": "fibre_g", "treat": "kcal"}
+
+
+def render_suggestions(sugg: dict) -> str:
+    """The finished suggestion list, echoed verbatim like `render_progress`.
+
+    Fitting picks come first under a heading chosen by mode; anything that would breach a
+    ceiling follows under its own heading with the breach named on the line. The split is
+    never collapsed — "this closes protein but puts you past fat" is the user's call to
+    make, and a breaching pick printed among the clean ones reads as a recommendation.
+    """
+    fits, over = sugg["fits"], sugg["over"]
+    heading = SUGGEST_HEADINGS.get(sugg["mode"], DEFAULT_SUGGEST_HEADING)
+    lines: list[str] = []
+    if fits:
+        lines += [heading, *(_pick_line(p) for p in fits)]
+        if over:
+            lines += ["", OVER_HEADING, *(_pick_line(p) for p in over)]
+    else:
+        # Nothing fits. In over_budget mode the heading already explains why; in any other
+        # mode the caveat has to come from OVER_HEADING or the breach loses its framing.
+        lines += [heading if sugg["mode"] == "over_budget" else OVER_HEADING,
+                  *(_pick_line(p) for p in over)]
+    return "\n".join(lines)
+
+
+def _pick_line(pick: dict) -> str:
+    """`<icon> <portion> (<what it does>[, <what it breaks>])`."""
+    icon, _, _ = _MACRO_WORDS[_CLOSES_MACRO[pick["closes"]]]
+    inner = [_covers(pick)]
+    if pick["over"]:
+        inner.append(_breach(pick["over"]))
+    return f"{icon} {_portion(pick)} ({', '.join(inner)})"
+
+
+def _portion(pick: dict) -> str:
+    """How much of it. Counted foods take the count in front ("1× tuna"); weighed foods
+    take the amount after an em dash ("smoked salmon — 100g").
+
+    A count deliberately gets no noun: the catalog stores `each` without recording whether
+    one is a can, a fillet or a slice, and inventing the word is the drift this block
+    exists to stop.
+    """
+    if pick["unit"] == "each":
+        return f"{pick['amount']:g}× {pick['name']}"
+    return f"{pick['name']} — {pick['amount']:g}{pick['unit']}"
+
+
+def _covers(pick: dict) -> str:
+    # A treat has no gap to close (both floors were met to get here) — its cost is the
+    # only number worth printing, and `_treat_picks` sets no `covers_g` to print instead.
+    if pick["closes"] == "treat":
+        return f"~{_at_least_one(pick['kcal'])} kcal"
+    return f"~{_at_least_one(pick['covers_g'])}g {pick['closes']}"
+
+
+def _breach(over: dict) -> str:
+    """"4g past fat", or "4g past fat and 12g past carbs" — in `_ROOM_MACROS` order,
+    which is what `_overshoot` builds the map in."""
+    return " and ".join(
+        f"{_at_least_one(amount)}{_MACRO_WORDS[macro][2]} past {_MACRO_WORDS[macro][1]}"
+        for macro, amount in over.items()
+    )
+
+
+def _at_least_one(value: float) -> int:
+    """Whole units, never rounded down to zero. Every number this block prints exists by
+    construction — a pick covers something, a breach breaches something — so "0g past fat"
+    would read as "it fits". Unlike the progress block there is nothing here that has to
+    add up, so whole units are free.
+    """
+    return max(1, round(value))
 
 
 # --- internals ----------------------------------------------------------------

@@ -28,6 +28,16 @@ def test_propose_projects_current_plus_estimate(ctx, catalog):
     assert out["projected_day_totals"]["kcal"] == 393.0                               # 108 + 285
 
 
+def test_the_projected_block_says_it_is_a_projection(ctx, catalog):
+    """Nothing is written yet, so the block under an estimate must not read like the day's
+    log — same shape, different heading."""
+    ctx(text="pizza", reply_handle="c1")
+    food.log_food(DAY, "lunch", [{"name": "banana", "quantity": 1, "unit": "each"}])
+    block = food.propose_food_estimate(DAY, "dinner", PIZZA)["projected_day_totals"]["progress_block"]
+    assert block.startswith("Would put today at\n")
+    assert "🔥 Calories: 393 / 2200 (1807 left)" in block        # the projection, not the 108 logged
+
+
 def test_confirm_writes_estimated_rows_with_original_provenance(ctx):
     ctx(text="two slices of pizza", reply_handle="c1")
     food.propose_food_estimate(DAY, "dinner", PIZZA)
@@ -85,11 +95,28 @@ def test_confirming_an_estimate_offers_to_save_it(ctx):
     out = _confirm_pizza(ctx)
     (offer,) = out["catalog_offer"]
     assert offer["name"] == "pizza slice"
-    assert offer["ref_qty"] == 2 and offer["ref_unit"] == "each"   # per the portion eaten
-    assert offer["kcal"] == 285 and offer["fibre_g"] == 2
+    # Two slices were eaten, but a catalog entry is stored per one — a serving is not a
+    # reference portion, and "per 2 each" reads as a mistake in the listing.
+    assert offer["ref_qty"] == 1 and offer["ref_unit"] == "each"
+    assert offer["kcal"] == 142.5 and offer["fibre_g"] == 1
 
     frag = food.log_system_context(_msg())
     assert "SAVE OFFER" in frag and "pizza slice" in frag
+
+
+def test_a_weighed_food_is_offered_per_100g(ctx):
+    """Mass foods save per 100 g so they scale the way the catalog documents. Logged
+    150g of mince would otherwise have been offered — and saved — as 'per 150 g'."""
+    ctx(text="150g beef mince, 5% fat", reply_handle="c1")
+    food.propose_food_estimate(DAY, "lunch", [{
+        "name": "beef mince 5% fat", "quantity": 150, "unit": "g",
+        "kcal": 188, "protein_g": 30.5, "carb_g": 0, "fat_g": 7.5, "fibre_g": 0}])
+    ctx(text="looks right", reply_handle="c1")
+
+    (offer,) = food.confirm_pending()["catalog_offer"]
+    assert offer["ref_qty"] == 100 and offer["ref_unit"] == "g"
+    assert offer["kcal"] == 125.33 and offer["protein_g"] == 20.33
+    assert "per 100g" in food.log_system_context(_msg())
 
 
 def test_no_offer_for_a_food_already_in_the_catalog(ctx, catalog):

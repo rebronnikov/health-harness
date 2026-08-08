@@ -22,6 +22,17 @@ def test_suggestions_appear_in_the_evening_for_today(ctx, catalog):
     assert "suggestions" in food.get_day_totals(TODAY)
 
 
+def test_the_rendered_block_travels_with_the_suggestions(ctx, catalog):
+    """The list is rendered here for the same reason the progress block is: the reply
+    only echoes it. Structured `suggestions` stays alongside for `off_catalog_ok`, which
+    the model does still have to word itself."""
+    ctx(timestamp=EVENING)
+    out = food.get_day_totals(TODAY)
+    assert out["suggestions_block"].startswith("To close the gaps\n")
+    ctx()                                                       # back to noon: neither key
+    assert "suggestions_block" not in food.get_day_totals(TODAY)
+
+
 def test_no_suggestions_for_a_past_date(ctx, catalog):
     ctx(timestamp=EVENING)
     assert "suggestions" not in food.get_day_totals(YESTERDAY)  # gate requires date == today
@@ -37,6 +48,18 @@ def test_suggest_food_bypasses_the_evening_gate(ctx, catalog):
     out = food.suggest_food(TODAY)
     assert out["suggestions"] is not None
     assert out["suggestions"]["fits"]
+    assert out["suggestions_block"].startswith("To close the gaps\n")
+
+
+def test_suggest_food_omits_the_block_when_there_is_nothing_to_say(ctx, catalog):
+    """`suggest` can legitimately come back with nothing — here the day is past the calorie
+    ceiling and the fixture catalog holds no fibre-bearing food to close the one open floor
+    with. The block key must then be absent rather than an empty string."""
+    ctx()
+    food.log_food(TODAY, "dinner", [{"name": "salmon", "quantity": 1200, "unit": "g"}])
+    out = food.suggest_food(TODAY)                              # 2340 kcal (over), 277g protein
+    assert out["suggestions"] is None
+    assert "suggestions_block" not in out
 
 
 def test_suggest_food_defaults_to_today(ctx, catalog):
