@@ -48,6 +48,10 @@ class Feature:
     dedupe_key: tuple[str, ...] = ()          # column names forming the dedupe key
     project: Callable[[sqlite3.Connection, dict], None] | None = None
                                              # idempotent upsert of one canonical row
+    verbatim_blocks: tuple[str, ...] = ()    # result keys whose string value is a FINISHED,
+                                             # rendered text that must reach the user byte for
+                                             # byte. The harness restores any the reply retyped.
+                                             # A reply can swap icons while preserving the figures.
     system_context: Callable[[Any], str | None] | None = None
                                              # optional per-message system-prompt fragment, given
                                              # the in-flight NormalizedMessage. Lets a feature

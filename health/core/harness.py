@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from anthropic import Anthropic
 
@@ -17,7 +18,8 @@ from health.config import MODEL
 from health.core import history
 from health.core.contracts import NormalizedMessage, current_message
 from health.core.prompts import STATIC_PROMPT, clock_line
-from health.core.registry import all_executors, all_tools, system_context_fragments
+from health.core.registry import (all_executors, all_tools, system_context_fragments,
+                                  verbatim_block_keys)
 from health.store import msg_log
 
 log = logging.getLogger(__name__)
@@ -172,6 +174,75 @@ def _record_usage(msg: NormalizedMessage, resp) -> None:
     )
 
 
+# Emoji and other non-ASCII are exactly what the model substitutes when it retypes a
+# rendered block, so a line's identity is what survives stripping them.
+_NON_ASCII = re.compile(r"[^\x00-\x7f]")
+
+
+def _line_key(line: str) -> str:
+    return " ".join(_NON_ASCII.sub("", line).split())
+
+
+def _collect_blocks(out, keys: frozenset, into: list) -> None:
+    """Gather every declared verbatim block in one tool result, at any depth.
+
+    Depth matters: the food executors nest theirs under `day_totals` and
+    `projected_day_totals`, and a top-level-only scan would miss every one of them.
+    """
+    if isinstance(out, dict):
+        for k, v in out.items():
+            if k in keys and isinstance(v, str) and v.strip():
+                into.append(v)
+            else:
+                _collect_blocks(v, keys, into)
+    elif isinstance(out, list):
+        for v in out:
+            _collect_blocks(v, keys, into)
+
+
+def _restore_blocks(reply: str, blocks: list) -> str:
+    """Put back any rendered block line the reply altered.
+
+    A reply can preserve the figures while swapping icons.
+    Harmless-looking, but it defeats the block's only purpose — the user compares days at a
+    glance — and it compounds, because history.save then stores the mutated reply and feeds
+    it back, so one drift holds for the whole session.
+
+    Matching is line-wise on the ASCII skeleton, so a swapped or dropped icon is repaired
+    while a line whose NUMBERS differ simply doesn't match and is left alone: if the model
+    meant something else there, that is a bug to see, not to paper over. Anything still not
+    verbatim afterwards is logged rather than rewritten further — a detector, like
+    report_usage's hit% column, not a licence to overwrite prose.
+    """
+    canon = {}
+    for b in blocks:
+        for line in b.split("\n"):
+            key = _line_key(line)
+            if key:
+                canon.setdefault(key, line)
+    if not canon:
+        return reply
+    out, fixed = [], 0
+    for line in reply.split("\n"):
+        want = canon.get(_line_key(line))
+        if want is not None and want != line:
+            line, fixed = want, fixed + 1
+        out.append(line)
+    repaired = "\n".join(out)
+    if fixed:
+        log.warning("restored %d rendered block line(s) the reply had altered", fixed)
+    # Only a block the reply PARTLY used is worth a warning. A turn often returns a block
+    # the reply legitimately omits — propose_food_estimate hands back a projection the
+    # model may not show — and warning on those would bury the real signal.
+    for b in blocks:
+        if b in repaired:
+            continue
+        keys = {_line_key(x) for x in b.split("\n") if _line_key(x)}
+        if keys & {_line_key(x) for x in repaired.split("\n")}:
+            log.warning("a rendered block reached the reply altered beyond line repair")
+    return repaired
+
+
 def handle(msg: NormalizedMessage) -> str:
     token = current_message.set(msg)         # runtime provenance for every executor this turn
     msg_log.inbound(msg)                     # transcript: what was said (see store/msg_log.py)
@@ -192,6 +263,8 @@ def handle(msg: NormalizedMessage) -> str:
         # Registry tools first, server tools last: a stable prefix keeps the request
         # cacheable as features come and go.
         tools, execs = all_tools() + SERVER_TOOLS, all_executors()
+        # Rendered texts returned this turn, to be restored into the reply below.
+        block_keys, blocks = verbatim_block_keys(), []
 
         # web_search_20260209 filters its results inside a server-side code-execution
         # container, so a turn that searched carries a container id that EVERY later
@@ -247,6 +320,9 @@ def handle(msg: NormalizedMessage) -> str:
                     log.warning("no reply text (stop_reason=%r); sending failsafe", stop)
                     msg_log.outbound(msg, FAILSAFE_REPLY)
                     return FAILSAFE_REPLY
+                # Before history and the transcript, so the stored reply is the canonical
+                # one — otherwise a drift is recalled next turn and reproduced faithfully.
+                reply = _restore_blocks(reply, blocks)
                 history.save(msg, reply)     # text only — never the tool blocks above
                 msg_log.outbound(msg, reply)
                 return reply
@@ -256,6 +332,7 @@ def handle(msg: NormalizedMessage) -> str:
                 try:
                     out = execs[tu.name](**tu.input)
                     msg_log.tool_call(msg, tu.name, tu.input, result=out)
+                    _collect_blocks(out, block_keys, blocks)
                     results.append({
                         "type": "tool_result",
                         "tool_use_id": tu.id,

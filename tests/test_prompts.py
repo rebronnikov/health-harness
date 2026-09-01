@@ -101,3 +101,33 @@ def test_the_lookup_ladder_is_ordered_and_ends_at_the_estimate_gate():
 def test_a_stated_assumption_closes_the_question():
     out = STATIC_PROMPT
     assert "never ask about a detail you already settled with a stated assumption" in out
+
+
+def test_the_estimate_must_be_staged_before_it_is_shown():
+    """The 2026-08 confirmation loop: the model wrote estimates as prose and only called
+    propose_food_estimate after the owner had already said yes, so his "yes" landed on an empty
+    slot and cost him a second (sometimes third) confirmation. The rule used to be one
+    sentence buried between BIAS TO ACT and the macros ladder; it is now its own section,
+    and it must keep saying which comes first."""
+    body = BODY.lower()
+    assert "estimates:" in body
+    staged = body.index("estimates:")
+    section = body[staged:staged + 900]
+    assert "propose_food_estimate first" in section
+    assert "estimate and log it" in section          # the explicit-instruction case
+
+
+def test_no_macro_number_may_be_invented():
+    assert "never put a macro number in a reply that no tool returned this turn" in BODY.lower()
+
+
+def test_the_meal_question_is_conditional_on_the_result():
+    """Six foods now carry a fixed label, so "the user didn't name a meal" is no longer the
+    same thing as "a question is owed". The trigger has to be what the tool actually wrote,
+    or the bot goes back to asking about rows that are already settled."""
+    body = BODY.lower()
+    assert "needs_meal" in body
+    meal = body[body.index("meal:"):body.index("meal:") + 1400]
+    assert "only when `needs_meal` comes back true" in meal
+    assert "one message can write two meals" in meal
+    assert "never infer it from the clock" in meal          # the old rule still stands

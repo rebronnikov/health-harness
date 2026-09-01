@@ -47,6 +47,15 @@ def system_context_fragments(msg) -> list[str]:
     return out
 
 
+def verbatim_block_keys() -> frozenset[str]:
+    """Every result key features declare as a rendered, reproduce-exactly block.
+
+    The core stays feature-agnostic: it learns the key names from the declarations and
+    never knows that `progress_block` is a food concept.
+    """
+    return frozenset(k for f in FEATURES for k in f.verbatim_blocks)
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     for f in FEATURES:
         if f.schema:

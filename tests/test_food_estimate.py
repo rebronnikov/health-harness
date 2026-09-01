@@ -2,6 +2,8 @@
 nothing; confirm_pending commits with estimated=1 and the ORIGINAL food message
 as provenance (not the later 'yes'); the pending slot is per-chat and cleared.
 """
+import pytest
+
 from health.features import food
 from health.core.contracts import NormalizedMessage
 from health.store.connection import get_conn
@@ -56,13 +58,14 @@ def test_confirm_clears_pending(ctx):
     ctx(text="yes", reply_handle="c1")
     food.confirm_pending()
     assert "c1" not in food._pending                              # slot consumed
-    assert food.confirm_pending()["error"]                        # second confirm finds nothing
+    with pytest.raises(ValueError):                               # second confirm finds nothing
+        food.confirm_pending()
 
 
-def test_confirm_with_nothing_pending_errors(ctx):
+def test_confirm_with_nothing_pending_raises(ctx):
     ctx(text="yes", reply_handle="empty")
-    out = food.confirm_pending()
-    assert "error" in out
+    with pytest.raises(ValueError, match="Nothing is pending"):
+        food.confirm_pending()
     assert rows(get_conn(), "SELECT * FROM food_log") == []
 
 

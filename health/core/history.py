@@ -48,6 +48,42 @@ def load(msg) -> list[dict]:
     return list(entry["messages"])
 
 
+def _last(msg, role: str) -> str | None:
+    """The most recent message of `role` in this chat's recalled thread.
+
+    A read-only view over `load()`, so `IDLE_EXPIRY` applies identically and there is no
+    second notion of freshness to keep in step. The current turn is not in here yet — it is
+    saved only once a reply exists — so these read the turn BEFORE the one in flight.
+    """
+    for m in reversed(load(msg)):
+        if m["role"] == role:
+            return m["content"]
+    return None
+
+
+def last_reply(msg) -> str | None:
+    """What the bot last said to this chat, or None if the thread is new or stale.
+
+    It exists so a feature can verify at RUNTIME that the user was actually shown something
+    before acting on their agreement to it — `food.confirm_pending` uses it to tell a model
+    catching up on an estimate the user has already seen from a model confirming numbers it
+    invented this turn. Reading the conversation is the only way to know that, and reading
+    it here keeps the answer runtime-authored rather than something the model asserts about
+    itself.
+    """
+    return _last(msg, "assistant")
+
+
+def last_user_message(msg) -> str | None:
+    """What the user last said before the message in flight.
+
+    Used for provenance in exactly one place: when an estimate is staged on the very
+    message that confirms it, the food was described in the turn before, so that is the
+    text `raw` should carry — not "Yes please".
+    """
+    return _last(msg, "user")
+
+
 def save(msg, reply: str) -> None:
     """Append this turn (the user's text + the assistant's final reply) to the chat's
     transcript, trimming to the most recent MAX_TURNS pairs."""

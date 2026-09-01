@@ -13,10 +13,16 @@ Claude): Claude maps language -> (food, quantity, unit) and, for unknown foods,
 (amount / ref_qty) and summation.
 
 Estimates are gated: a food whose MACROS we have to estimate is NOT written on the spot.
-It is stashed in an ephemeral per-chat pending slot and only committed when the user
-confirms — confirm_pending refuses a confirmation from the same message that proposed
-(the model once chained propose → confirm in one turn and committed an estimate the user
-never saw). Catalog hits and user-supplied macros auto-commit, as everything else does.
+It is stashed in an ephemeral per-chat pending slot and only committed once the user has
+SEEN the numbers and agreed to them. That is the actual rule; "not from the proposing
+message" is only the usual way to check it, and checking it that way alone cost the owner an
+extra confirmation on most estimates through 2026-08 — the model kept showing an estimate
+as prose and calling propose_food_estimate only after he had already said yes, so the
+refusal fired on a proposal he had plainly seen. confirm_pending now reads the previous
+reply (core/history.py) to tell that catch-up apart from the 2026-07-25 incident it
+guards against, where the model chained propose → confirm in one turn and committed an
+estimate that had appeared nowhere. Catalog hits and user-supplied macros auto-commit, as
+everything else does.
 
 Known hole, and it bites harder now the bot is forbidden to ask before logging: the gate
 keys on estimated *macros*, not estimated *amounts*. A catalog hit whose quantity Claude
@@ -29,6 +35,7 @@ import re
 import sqlite3
 from typing import Any
 
+from health.core import history
 from health.core.contracts import Feature, get_context
 from health.features import targets
 from health.store import writer
@@ -174,6 +181,31 @@ def normalise_meal(meal: str | None) -> str:
     return (meal or "").strip().lower() or UNLABELLED_MEAL
 
 
+# Foods that always carry their own meal label. Keyed by display name and slugged through
+# the same `_slug` the log path uses, so this reads like the catalog listing the owner sees and
+# cannot drift from how names are keyed. A name that stops matching the catalog would just
+# fall through to the old behaviour — silently — which is what the round-trip test guards.
+DEFAULT_MEALS = {_slug(name): normalise_meal(meal) for name, meal in {
+    "psyllium husk": "supplements",
+    "creatine": "supplements",
+    "vitamin D": "supplements",
+    "fish oil": "supplements",
+    "protein bar": "snack",
+    "dates": "snack",
+}.items()}
+
+
+def _resolve_meal(slug: str, meal: str | None) -> str:
+    """The meal one logged food lands under.
+
+    A food in DEFAULT_MEALS takes its own label and **outranks a meal named in the message**,
+    which is the surprising half and is deliberate. A breakfast message can contain supplements and meal items. One call can therefore write two meals, and both `log_food`'s return and the MEAL prompt rule are shaped for it.
+
+    Anything else keeps the old behaviour: the named meal, or `unlabelled` and a question.
+    """
+    return DEFAULT_MEALS.get(slug) or normalise_meal(meal)
+
+
 def _accumulate(acc: dict, slug: str, name: str, amount: float, unit: str,
                 macros: dict, catalog_slug: str | None) -> None:
     # Sum items that share a slug so two mentions of one food in a single message land as
@@ -266,10 +298,12 @@ def log_food(date: str, meal: str | None = None, items: list[dict] | None = None
 
         _accumulate(resolved, slug, name, amount, unit, macros, catalog_slug)
 
-    meal_label = normalise_meal(meal)
+    # Resolved per item, not once for the call: a food with a fixed label takes it even
+    # when the message names a meal, so one message can legitimately write two meals.
     logged = [
-        writer.record("food_log", {"date": date, "meal": meal_label, "estimated": 0, **fields})
-        for fields in resolved.values()
+        writer.record("food_log",
+                      {"date": date, "meal": _resolve_meal(slug, meal), "estimated": 0, **fields})
+        for slug, fields in resolved.items()
     ]
     # A committed log supersedes any pending estimate for the same food (e.g. the user
     # answered a proposal with real macros) — drop it so a later "yes" can't double-log.
@@ -279,8 +313,10 @@ def log_food(date: str, meal: str | None = None, items: list[dict] | None = None
         if not pend["rows"]:
             _pending.pop(get_context().reply_handle, None)
     return {"logged": logged, "unresolved": unresolved,
-            "meal": meal_label,
-            "needs_meal": meal_label == UNLABELLED_MEAL and bool(logged),
+            # Plural because the rows may not agree — a single value would be wrong on any
+            # morning a breakfast list carries a supplement. Each row also states its own.
+            "meals": sorted({r["meal"] for r in logged}),
+            "needs_meal": any(r["meal"] == UNLABELLED_MEAL for r in logged),
             "day_totals": _status(_day_totals(conn, date), date)}
 
 
@@ -298,6 +334,7 @@ def propose_food_estimate(date: str, meal: str | None = None,
     _pending[ctx.reply_handle] = {
         "date": date, "meal": meal, "rows": rows, "original_raw": ctx.text or "",
         "proposed_in": ctx,  # identity of the proposing message; same turn ⇔ same object
+        "proposed_at": ctx.timestamp,   # so an abandoned proposal goes stale, see _guard_fresh
     }
     current = _day_totals(get_conn(), date)
     projected = {
@@ -311,35 +348,56 @@ def propose_food_estimate(date: str, meal: str | None = None,
             "needs_confirmation": True}
 
 
-def confirm_pending() -> dict:
-    handle = get_context().reply_handle
+def confirm_pending(meal: str | None = None, expect_food: str | None = None) -> dict:
+    ctx = get_context()
+    handle = ctx.reply_handle
     pend = _pending.get(handle)
     if pend is None:
-        return {"error": "Nothing pending to confirm."}
-    if pend["proposed_in"] is get_context():
-        # Confirmation must come from the USER, in a later message. On 2026-07-25 the
-        # model chained propose → confirm inside one turn and committed an estimate the
-        # user never saw (a duplicate 200g beef mince). Refuse — and keep the pending
-        # alive so the user's real "yes" next turn still lands.
-        return {
-            "error": "This estimate was proposed by the CURRENT message — the user has "
-                     "not seen it yet and nothing was logged. Reply with the estimate and "
-                     "ask them to confirm; call confirm_pending only when a LATER message "
-                     "from the user confirms it.",
-            "pending": pend["rows"],
-        }
+        # A hard error, not a soft {"error": ...} result. Returned as data this read as
+        # advisory and the model twice answered it with a confident "Logged:" plus an
+        # invented progress block for a row that was never written. The harness turns a raise into is_error, which is the
+        # same shape corrections.set_meal already uses for exactly this.
+        raise ValueError(
+            "Nothing is pending for this chat, so nothing was logged. An estimate is only "
+            "staged by propose_food_estimate — if you showed the user numbers without "
+            "calling it, call it now and let their NEXT message confirm."
+        )
+    _guard_expected_food(pend, expect_food)
+    _guard_fresh(handle, pend, ctx)
+    if pend["proposed_in"] is ctx and not _user_has_seen(pend, ctx):
+        # A same-turn proposal must stay pending until the user sees and confirms it.
+        raise ValueError(
+            "This estimate was proposed by the CURRENT message and your previous reply did "
+            "not show the user these numbers, so they have not seen them and nothing was "
+            f"logged. Reply with the estimate ({_describe(pend)}) and ask them to confirm; "
+            "call confirm_pending when their NEXT message does."
+        )
+    # Provenance. `raw` is normally the message that described the food, captured when the
+    # estimate was staged. On the catch-up path the staging happened on the CONFIRMING
+    # message, so that capture is "Yes please" — useless as a record of what was eaten.
+    # The food was described in the turn before, which is what history hands back.
+    raw = pend["original_raw"]
+    if pend["proposed_in"] is ctx:
+        raw = history.last_user_message(ctx) or raw
     _pending.pop(handle)
     _offer.pop(handle, None)             # a new commit supersedes any unanswered offer
     acc: dict[str, dict] = {}
     for r in pend["rows"]:
         _accumulate(acc, r["food_slug"], r["food_name"], r["amount"], r["amount_unit"],
                     r, r["catalog_slug"])
-    meal_label = normalise_meal(pend["meal"])
+    # A meal named while confirming wins over the one the estimate was proposed under.
+    # The user can correct the meal in the confirmation message.
+    #
+    # DEFAULT_MEALS deliberately does NOT apply here, though applying it in both paths for
+    # symmetry is the obvious wrong move: this path exists for foods with no catalog entry,
+    # so no default can match — and `meal` here is an explicit correction from the user,
+    # which a default must never outrank.
+    meal_label = normalise_meal(meal if meal is not None else pend["meal"])
     logged = [
         writer.record(
             "food_log",
             {"date": pend["date"], "meal": meal_label, "estimated": 1, **fields},
-            raw=pend["original_raw"],  # the food message, not the "yes"
+            raw=raw,                   # the food message, not the "yes"
         )
         for fields in acc.values()
     ]
@@ -477,6 +535,63 @@ _pending: dict[Any, dict] = {}
 _offer: dict[Any, dict] = {}
 
 
+# A pending estimate goes stale on the same clock the conversation does. Before this it
+# had no bound at all: an abandoned proposal sat in the slot indefinitely and the next
+# unrelated "yes" committed it. Reusing history's constant rather than inventing a second
+# one keeps "is this thread still live?" a single answer.
+PENDING_EXPIRY = history.IDLE_EXPIRY
+
+
+def _describe(pend: dict) -> str:
+    """The pending rows as one short phrase, for an error the model has to act on."""
+    return ", ".join(f"{r['amount']:g}{r['amount_unit']} {r['food_name']} "
+                     f"({r['kcal']:g} kcal)" for r in pend["rows"])
+
+
+def _guard_expected_food(pend: dict, expect_food: str | None) -> None:
+    """Require a matching food name before confirming a pending estimate."""
+    if not expect_food:
+        return
+    if _slug(expect_food) not in {r["food_slug"] for r in pend["rows"]}:
+        raise ValueError(
+            f"The pending estimate is {_describe(pend)}, not {expect_food!r} — nothing was "
+            "logged. If you meant a different food, propose_food_estimate it first; if you "
+            "meant the pending one, confirm it by its own name."
+        )
+
+
+def _guard_fresh(handle: Any, pend: dict, ctx) -> None:
+    """Drop and refuse a proposal older than the conversation that produced it."""
+    if ctx.timestamp - pend["proposed_at"] > PENDING_EXPIRY:
+        _pending.pop(handle, None)
+        raise ValueError(
+            f"The pending estimate ({_describe(pend)}) is too old to confirm and has been "
+            "dropped; nothing was logged. Propose it again if the user still wants it."
+        )
+
+
+def _user_has_seen(pend: dict, ctx) -> bool:
+    """Did the previous reply actually put these numbers in front of the user?
+
+    This is the property the same-turn guard is really defending — "the user has seen it" —
+    rather than the proxy it used to test, "a different message proposed it". The proxy
+    charges the user an extra round-trip whenever the model shows an estimate as prose and
+    only calls propose_food_estimate after they have already agreed. Reading it off the recalled
+    conversation keeps the answer runtime-authored: the model asserts nothing about itself.
+
+    Every row must match, so one coincidental figure can't wave through a multi-item
+    proposal, and a wholly zero-kcal estimate never matches — it has no distinctive number,
+    and the ladder logs zeros directly rather than proposing them anyway.
+    """
+    reply = history.last_reply(ctx)
+    if not reply:
+        return False
+    kcals = [round(r["kcal"]) for r in pend["rows"]]
+    if not any(kcals):
+        return False
+    return all(re.search(rf"\b{k}\b", reply) for k in kcals)
+
+
 # What a saved food should be stored per, by unit: weighed foods per 100 g/ml, counted
 # foods per one. Anything else keeps the eaten amount.
 _OFFER_REF_QTY = {"g": 100.0, "ml": 100.0, "each": 1.0}
@@ -541,7 +656,9 @@ def _pending_section(msg) -> str | None:
     bound. This states the pending rows outright so confirm_pending never depends on the
     proposal still being in the recalled window."""
     pend = _pending.get(msg.reply_handle)
-    if not pend:
+    # An expired proposal is not actionable, so announcing it would only invite a
+    # confirmation that _guard_fresh then refuses.
+    if not pend or msg.timestamp - pend["proposed_at"] > PENDING_EXPIRY:
         return None
     items = ", ".join(
         f"{r['amount']:g}{r['amount_unit']} {r['food_name']} "
@@ -552,8 +669,10 @@ def _pending_section(msg) -> str | None:
     return (
         f"PENDING: a {meal} food estimate is awaiting the user's confirmation — "
         f"{items}. If this message confirms it (e.g. 'yes', 'looks right'), call "
-        "confirm_pending. If it amends the estimate, call propose_food_estimate again "
-        "with the corrected values."
+        "confirm_pending, passing expect_food so a mismatch is caught. If it confirms it "
+        "but names a different meal ('log it for lunch'), pass that as confirm_pending's "
+        "`meal` — that is the whole change, not a reason to re-propose. If it amends the "
+        "NUMBERS or the amount, call propose_food_estimate again with the corrected values."
     )
 
 
@@ -740,9 +859,13 @@ LOG_TOOLS = [
             "Use when the user ate something NOT in their catalog and did NOT give macros, so you "
             "must estimate. Do NOT estimate a food that likely matches one of the user's SAVED "
             "FOODS — log it by its catalog name via log_food, or ask to clarify if unsure which. "
-            "This SAVES NOTHING — it returns your estimate for you to show the user "
-            "and ask them to confirm. Only after they confirm (e.g. 'yes', 'looks right') do you "
-            "call confirm_pending to actually log it. Give your best per-item macro estimate. "
+            "This is the ONLY way to put an estimate in front of the user: it stages the "
+            "numbers so their next message's 'yes' has something to commit. CALL IT BEFORE you "
+            "write the estimate into your reply, every time — including when their own message "
+            "already says 'estimate and log it'. If you write macro numbers into a reply without "
+            "calling this first, nothing is staged: their 'yes' finds nothing to confirm and the "
+            "food is never logged. It writes no row itself; confirm_pending does that once they "
+            "confirm (e.g. 'yes', 'looks right'). Give your best per-item macro estimate. "
             "This is also the ONLY route for macros you looked up with web_search — a looked-up "
             "number is still an estimate the user has not seen; say where it came from when you "
             "show it."
@@ -774,12 +897,20 @@ LOG_TOOLS = [
     {
         "name": "confirm_pending",
         "description": (
-            "Commit the most recently proposed food estimate for this chat. Call this ONLY when a "
-            "LATER user message confirms a pending estimate — never in the same turn that proposed "
-            "it (the proposal must reach the user first; a same-turn call is refused and logs "
-            "nothing). The logged rows are marked as estimated."
+            "Commit the food estimate currently pending for this chat. Call this ONLY when a "
+            "LATER user message confirms it — never in the same turn that proposed it, unless "
+            "your PREVIOUS reply already showed the user these exact numbers and this message "
+            "agrees to them. A same-turn call the user has not seen is refused and logs nothing. "
+            "The logged rows are marked as estimated."
         ),
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "meal": {"type": "string", "description": "Only if the user names a meal when confirming, or corrects the one the estimate was proposed under ('log it for lunch'). Overrides the pending estimate's meal; omit to keep it. Pass the label exactly as given; repeats are not numbered, so two 'breakfast' messages are one breakfast."},
+                "expect_food": {"type": "string", "description": "The food you believe you are confirming, as you named it in propose_food_estimate. Pass it whenever you know it: if it does not match what is actually pending, the call is refused instead of logging the wrong food."},
+            },
+            "required": [],
+        },
     },
     {
         "name": "get_day_totals",
@@ -840,5 +971,8 @@ LOG_FEATURE = Feature(
     domain="food_log",
     dedupe_key=("date", "meal", "food_slug", "ingested_at"),
     project=project_log,
+    # targets.py renders these; the reply reproduces them. Declaring them here is what
+    # makes that enforceable in the harness instead of only asked for in the prompt.
+    verbatim_blocks=("progress_block", "suggestions_block"),
     system_context=log_system_context,
 )

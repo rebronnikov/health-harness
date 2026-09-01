@@ -1,7 +1,6 @@
 """log_food — the data-model heart: catalog scaling, each-vs-mass units, the
 unresolved path, same-slug accumulation, re-log-adds, and occasion labelling.
 """
-import json
 from datetime import timedelta
 
 import pytest
@@ -139,7 +138,7 @@ def test_missing_meal_logs_as_unlabelled_and_flags_it(ctx, catalog):
     """Food is never held hostage to a question: it lands immediately, marked for a label."""
     ctx()
     out = food.log_food(DAY, items=[{"name": "banana", "quantity": 1, "unit": "each"}])
-    assert out["meal"] == food.UNLABELLED_MEAL
+    assert out["meals"] == [food.UNLABELLED_MEAL]
     assert out["needs_meal"] is True
     assert out["day_totals"]["kcal"] == pytest.approx(108.0)    # counted while it waits
     assert [r["meal"] for r in rows(get_conn(), "SELECT meal FROM food_log")] == ["unlabelled"]
@@ -241,7 +240,8 @@ def test_log_food_supersedes_pending_estimate_for_same_food(ctx, catalog):
         "kcal": 184, "protein_g": 23.3, "carb_g": 0, "fat_g": 9.9, "fibre_g": 0,
     }])
     assert "c1" not in food._pending
-    assert "error" in food.confirm_pending()
+    with pytest.raises(ValueError, match="Nothing is pending"):
+        food.confirm_pending()
 
 
 _MINCE_ITEM = {
@@ -253,8 +253,8 @@ _MINCE_ITEM = {
 def test_confirm_pending_refused_in_proposing_turn(ctx):
     ctx(text="200g beef mince", reply_handle="c1")
     food.propose_food_estimate(DAY, "dinner", [_MINCE_ITEM])
-    out = food.confirm_pending()
-    assert "error" in out and out["pending"][0]["food_slug"] == "beef_mince"
+    with pytest.raises(ValueError, match="CURRENT message"):
+        food.confirm_pending()
     assert rows(get_conn(), "SELECT * FROM food_log") == []
     assert food._pending["c1"]["rows"][0]["food_slug"] == "beef_mince"
 
@@ -285,8 +285,8 @@ def test_harness_cannot_self_confirm_estimate(fake_client):
     harness.handle(msg)
     assert rows(get_conn(), "SELECT * FROM food_log") == []    # the refusal wrote nothing
 
-    refusal = json.loads(fake_client.calls[2]["messages"][-1]["content"][0]["content"])
-    assert "error" in refusal and "CURRENT message" in refusal["error"]
+    refusal = fake_client.calls[2]["messages"][-1]["content"][0]
+    assert refusal["is_error"] and "CURRENT message" in refusal["content"]
 
     harness.handle(NormalizedMessage(source="telegram", reply_handle="chat-1",
                                      timestamp=DEFAULT_TS + timedelta(seconds=30), text="yes"))
