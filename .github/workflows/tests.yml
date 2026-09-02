@@ -1,0 +1,61 @@
+# No secrets required: the suite is hermetic (tests/conftest.py redirects every data
+# path to a tempdir before the first import and fakes the Anthropic client), and the
+# demo job asserts that no API key is present before it runs.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest
+
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install ruff
+      - run: ruff check .
+
+  # The README's "try it in 60 seconds" as a check: seed a few days with no key, print
+  # today, rebuild the projection from the JSONL system of record, print today again,
+  # and require the two to be byte-identical.
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e .
+      - name: keyless seed, render, rebuild, render, diff
+        env:
+          DATA_DIR: ${{ runner.temp }}/demo
+          HEALTH_TODAY: "2026-09-02"
+        run: |
+          test -z "${ANTHROPIC_API_KEY:-}"
+          python -m health.seed_demo --days 3 --today "$HEALTH_TODAY"
+          printf '/today\n' | python -m health.cli > before.txt
+          python -m health.rebuild_db
+          printf '/today\n' | python -m health.cli > after.txt
+          diff before.txt after.txt
+          cat after.txt

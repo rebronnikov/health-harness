@@ -17,7 +17,7 @@ _SESSION_TMP = Path(tempfile.mkdtemp(prefix="health-tests-"))
 os.environ["DATA_DIR"] = str(_SESSION_TMP)                     # all 4 DATA_DIR/DB_PATH copies land here
 os.environ["DB_PATH"] = str(_SESSION_TMP / "session.sqlite")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-not-real")   # so importing harness's Anthropic() can't raise
-os.environ.setdefault("MODEL", "claude-sonnet-4-6")
+os.environ.setdefault("MODEL", "claude-sonnet-5")
 # Pin the targets to the shipped defaults: `config` loads `.env` with override=False,
 # so values set here win over a developer's own TARGET_* and the rendered-block
 # assertions stay byte-stable regardless of whose machine runs the suite.

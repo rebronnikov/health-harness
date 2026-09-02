@@ -22,7 +22,7 @@ This is deliberately the weakest thing that fixes that:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 MAX_TURNS = 10                          # user+assistant pairs kept per chat

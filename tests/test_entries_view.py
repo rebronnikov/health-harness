@@ -7,7 +7,7 @@ import pytest
 
 from health.adapters import entries_view as tg
 from health.core.contracts import NormalizedMessage
-from health.features import corrections, exercise, food, steps, weight
+from health.features import corrections, exercise, food, weight
 from health.store.connection import get_conn
 
 from conftest import DEFAULT_TS, log_steps, rows

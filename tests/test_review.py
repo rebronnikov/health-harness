@@ -8,7 +8,7 @@ import pytest
 
 from health.core import harness
 from health.core.contracts import NormalizedMessage
-from health.features import corrections, food, measurements, review, steps, targets, weight
+from health.features import corrections, food, measurements, review, targets, weight
 
 from conftest import DEFAULT_TS, log_steps, text_block, tool_block
 

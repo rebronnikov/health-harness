@@ -1,7 +1,6 @@
 """steps + weight: the simple (date, source) overwrite features. Re-logging a day
 overwrites in the projection but still appends to the JSONL log of record.
 """
-import json
 
 from health.features import measurements, steps, weight
 from health.store.connection import get_conn

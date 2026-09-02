@@ -26,3 +26,7 @@ config.local.toml
 
 # Publication working plan — quotes the personal-data inventory verbatim; never commit
 PUBLISHING_PLAN.md
+
+# Per-machine Claude Code permissions (a shared settings.json may ship later)
+.claude/settings.local.json
+.ruff_cache/

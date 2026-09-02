@@ -1,5 +1,7 @@
 # Bot down: macOS TCC blocks launchd from `~/Documents`
 
+> This incident is why the deploy template renders absolute paths.
+
 **Resolution:** Moving the checkout outside `~/Documents` restored polling.
 The virtual environment was recreated, `.env` and `data/` were carried over,
 and the LaunchAgent was reinstalled from the new checkout.
@@ -44,7 +46,7 @@ $ scripts/bot.sh status
 Re-pointing the logs to `/tmp` surfaced the underlying error:
 
 ```
-/bin/bash: ~/Documents/example-checkout/scripts/run-bot.sh: Operation not permitted
+/bin/bash: ~/Documents/example-checkout/scripts/run-bot.sh: Operation not permitted   # the launcher script of the time
 shell-init: error retrieving current directory: getcwd: cannot access parent directories:
             Operation not permitted
 ```
@@ -78,12 +80,11 @@ launchd context, and TCC has denied it ever since.
 
 ### Option A — Grant Full Disk Access (fastest, keep project in place)
 1. **System Settings → Privacy & Security → Full Disk Access**.
-2. Click **+**, then **⌘⇧G** and paste the bot's real Python binary:
+2. Click **+**, then **⌘⇧G** and paste the bot's real Python binary — the Homebrew
+   framework binary that `.venv/bin/python` is a symlink to:
    ```
-   /opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/bin/python3.12
+   readlink -f .venv/bin/python
    ```
-   (That's what `.venv/bin/python` resolves to — confirm with
-   `readlink -f .venv/bin/python` in case Homebrew bumped the patch version.)
 3. Toggle it **ON**.
 4. `scripts/bot.sh install` (re-bootstrap), then verify (below).
 - Caveat: TCC attribution for a launchd-run CLI binary can be finicky; if it still denies,
@@ -96,9 +97,9 @@ Move the checkout to a folder outside the protected directories. Steps:
 2. Copy the tree to the new path. **Recreate the venv** — its paths are absolute and won't
    survive a move: `python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`.
    Carry over `.env` and `data/` (the JSONL system-of-record + sqlite).
-3. Update the hardcoded checkout paths in **`scripts/bot.sh`** (`REPO=`)
-   and **`deploy/local.health-bot.plist`** (ProgramArguments, WorkingDirectory, log paths).
-4. `bot.sh install` from the new location, then verify.
+3. `bot.sh install` from the new location, then verify. (At the time the repo path was
+   hardcoded in `scripts/bot.sh` and the plist and had to be edited by hand; `install`
+   now renders `deploy/health-bot.plist.template` from the checkout's own location.)
 - `~/Library/Application Support/...` also works but is awkward to `cd` into; a top-level
   `~/Projects` or `~/Developer` dir is simpler.
 
@@ -112,6 +113,6 @@ Then send a Telegram message (e.g. "for breakfast I had 60g of oats" after savin
 confirm a reply + a row in `data/food_log.jsonl`.
 
 ## Current state (already done)
-- Deployment experiment fully reverted: `deploy/local.health-bot.plist` is back to the
-  original (direct venv-python invocation, logs under `data/logs/`); installed copy matches.
-- The food feature is implemented and verified; see
+- Deployment experiment fully reverted: the plist is back to the original (direct
+  venv-python invocation, logs under `data/logs/`); installed copy matches.
+- The food feature is implemented and verified.

@@ -45,9 +45,10 @@ def _targets() -> dict[str, int]:
 TARGETS = _targets()
 
 # --- Model + provenance versions ---
-# claude-sonnet-4-6 is the current Sonnet id; the chassis doc's
-# claude-sonnet-4-20250514 is the deprecated Sonnet 4 (retiring 2026-06-15).
-MODEL = os.environ.get("MODEL", "claude-sonnet-4-6")
+# The routing model. Sonnet is enough for routing + extraction, which is all the model
+# does here (invariant 1: it never computes). Override with MODEL in the environment;
+# note that prompt caches are model-scoped, so a change costs one cold prefix.
+MODEL = os.environ.get("MODEL", "claude-sonnet-5")
 MODEL_VERSION = MODEL              # provenance: which model parsed the message
 PARSER_VERSION = "v1"              # provenance: ingest-pipeline version
 

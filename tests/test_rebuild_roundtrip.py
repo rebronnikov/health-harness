@@ -8,7 +8,7 @@ import sqlite3
 import pytest
 
 from health import rebuild_db
-from health.features import corrections, exercise, food, measurements, steps, weight
+from health.features import corrections, exercise, food, measurements, weight
 from health.store.connection import get_conn
 
 from conftest import log_steps

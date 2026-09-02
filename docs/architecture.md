@@ -1,12 +1,20 @@
 # Fitness Harness — Architecture & Scaffolding
 
+> **The original chassis spec, written before any code existed.** The shape is what
+> shipped — one feature-agnostic path, the feature contract, the registry as the only
+> shared edit — and it has held through seven features. The specifics have moved on:
+> `operations/` became `health/features/`, `db/` became `health/store/`, the sketch's
+> `while True` became a bounded loop, and two of the rules below were superseded by
+> stronger ones (noted inline). Read `CLAUDE.md` for what is true today; read this for
+> why it is shaped the way it is.
+
 This is the **chassis** spec: the overall logic, the layering, and the skeleton to
 build first. Features are deliberately *not* detailed here — each one gets its own
 instruction + script later. What this doc fixes is the **contract every feature
 plugs into**, so those later features are self-contained and never touch the core.
 
-> Companion doc: `fitness-harness-plan.md` holds the per-feature detail (food
-> resolution, weekly analyses, schema). Pull from it when you build each feature.
+> A companion per-feature plan (food resolution, weekly analyses, schema) existed
+> alongside this and was consumed as the features were built; it is not published.
 > This doc is sufficient on its own to stand up the scaffolding.
 
 ---
@@ -44,6 +52,12 @@ Three responsibilities, cleanly separated:
 3. **Raw text is preserved**, so anything can be corrected later.
 4. **Computed values are snapshotted** into the row at write time.
 5. **The core never references a specific feature.** It only knows the registry.
+
+> *As shipped*, 3 and 4 were replaced by two stronger invariants: **the JSONL log is the
+> system of record and SQLite is a disposable projection** rebuilt from it by one
+> idempotent `project()` shared with live ingest, and **provenance (`raw`, `source`,
+> `ingested_at`) is stamped by the runtime, never authored by the model**. Corrections
+> became append-only events rather than edits.
 
 If a future feature would break one of these, the design is wrong — fix the
 feature, not the rule.
@@ -192,7 +206,7 @@ from core.prompts import build_system_prompt
 from core.contracts import NormalizedMessage
 
 client = Anthropic()                 # reads ANTHROPIC_API_KEY from env
-MODEL = "claude-sonnet-4-20250514"   # builder: confirm current model string
+MODEL = "claude-sonnet-..."          # builder: confirm current model string (config.MODEL today)
 
 def handle(msg: NormalizedMessage) -> str:
     system   = build_system_prompt(today=msg.timestamp.date())
@@ -259,6 +273,12 @@ class TelegramAdapter:
 ```
 
 ### 5.4 Reference feature — the template to copy
+
+> *As shipped*, an executor never runs SQL itself: it builds the SI-unit fields and calls
+> `writer.record()`, which appends the JSONL line first, then upserts the projection via
+> the feature's declared `project()`, then logs provenance. `health/features/steps.py`
+> is the current template; the sketch below is the pre-JSONL shape.
+
 ```python
 # operations/steps.py
 from datetime import datetime
@@ -330,7 +350,7 @@ Adding any feature later — exercise, measurements, targets, food, review — i
 same four-step recipe. This is what gets its own instruction + script each time.
 
 1. **Spec** the feature: what it captures, its tool(s), its table(s), edge cases.
-   (For food + review, lift this from `fitness-harness-plan.md`.)
+   (Food and review were the two that needed a written spec first.)
 2. **Implement** `operations/<feature>.py`: `SCHEMA`, `TOOLS`, executor fn(s),
    `EXECUTORS`, and the `FEATURE = Feature(...)` line. Copy `steps.py` as the shape.
 3. **Register**: uncomment/add `<feature>.FEATURE` in `core/registry.py`.

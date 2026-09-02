@@ -11,7 +11,7 @@ import pytest
 
 from health.core import harness
 from health.core.contracts import NormalizedMessage
-from health.features import corrections, food, steps
+from health.features import corrections, food
 from health.store.connection import get_conn
 
 from conftest import DEFAULT_TS, log_steps, rows, system_text, text_block, tool_block

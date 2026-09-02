@@ -1,4 +1,7 @@
-"""One-off: give already-logged banana rows the fibre the catalog never had.
+"""One-off, kept as a worked example of correcting data through `corrections.edit_entry`
+rather than by editing the JSONL.
+
+Give the 42 already-logged banana rows the fibre the catalog never had.
 
 `food_catalog.banana` was seeded with `fibre_g = 0` because the retailer's label omits
 fibre. Every row logged from it copied that zero forward, so a food that carries ~1.4g
@@ -16,7 +19,7 @@ the source from the in-flight message and never from their caller.
 
 Re-runnable: the `fibre_g = 0` filter means a second run selects nothing.
 
-    .venv/bin/python scripts/backfill_banana_fibre.py [--dry-run]
+    .venv/bin/python scripts/backfill_via_corrections.py [--dry-run]
 
 Disposable — the permanent record is the events in data/corrections.jsonl.
 """
@@ -71,7 +74,7 @@ def main() -> None:
     token = current_message.set(msg)
     try:
         for r in rows:
-            # Fibre scales with the amount logged.
+            # Fibre scales with the amount logged: one row is 2 bananas, the rest are 1.
             corrections.edit_entry(
                 "food_log",
                 key={k: r[k] for k in ("date", "meal", "food_slug", "ingested_at")},

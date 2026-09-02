@@ -35,7 +35,7 @@ def test_seeds_the_window_through_the_executors():
     assert {r["date"] for r in logged} == {"2026-07-12", "2026-07-13", "2026-07-14"}
     assert all(r["raw"].startswith(("breakfast:", "lunch:", "dinner:", "snack:")) for r in logged)
     # Provenance is stamped by writer.record from the bound context, never by the seeder.
-    record = [json.loads(l) for l in (writer.DATA_DIR / "food_log.jsonl").read_text().splitlines()]
+    record = [json.loads(line) for line in (writer.DATA_DIR / "food_log.jsonl").read_text().splitlines()]
     assert len(record) == len(logged)
     assert {r["source"] for r in record} == {seed_demo.SOURCE}
     assert out["food_rows"] == len(logged)

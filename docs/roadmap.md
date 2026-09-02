@@ -1,5 +1,7 @@
 # Roadmap
 
+> Working notes, lightly edited for publication. Paths are as of the last edit.
+
 Tracked follow-ups for the health bot. Ordered roughly by priority; not commitments.
 
 ## Done
@@ -21,7 +23,7 @@ Tracked follow-ups for the health bot. Ordered roughly by priority; not commitme
   left on calories, fat and carbs, and returns `fits` / `over` (with the breach in grams)
   / `off_catalog_ok`. `suggest_food` answers "what should I eat?" at any hour, not just
   after 16:00.
-- **Meal labels** — no more `breakfast-1`/`breakfast-2`: a label is whatever the owner calls
+- **Meal labels** — no more `breakfast-1`/`breakfast-2`: a label is whatever the user calls
   it, and several messages under one label are one meal. An unnamed meal logs as
   `unlabelled` immediately and the bot asks; `set_meal` resolves it.
 - **Offer to save an estimate** — a confirmed estimate that isn't in the catalog comes
@@ -57,7 +59,7 @@ a named bundle that *references* catalog ingredients with default amounts — e.
 `breakfast = jumbo oats 80g + milk 350ml + blueberries 50g`. Logging "ate breakfast"
 expands the meal into `food_log` rows, pulling each ingredient's macros from the
 catalog, scaling, and freezing the resolved numbers into the log (so history stays
-self-contained). Behaviour agreed with the owner:
+self-contained). Agreed behaviour:
 - **Default amounts** per component, with **per-day override** ("breakfast but 150g
   blueberries") and **adding extras** ("breakfast + a banana").
 - **Strictly two levels** — meals contain ingredients, not other meals.
@@ -81,8 +83,8 @@ work on the expanded rows untouched, since those are ordinary `food_log` entries
   `remaining()` frames consumed-vs-target and `suggest()` proposes catalog foods to
   close the gaps; `food._status` surfaces both after every log and adds evening
   suggestions past `SUGGEST_AFTER_HOUR`. Still to do: set targets from a bot message
-  (needs a persisted store instead of constants), derive them from body weight + goal
-  once `measurements` lands, and swap the placeholder numbers for the owner's aligned values.
+  (needs a persisted store instead of constants) and derive them from body weight + goal
+  once `measurements` lands.
 - **Richer summaries** — `get_summary` returns food/steps/weight/measurements over a
   range. Not yet in it: week-over-week comparison, day-of-week patterns, and the catalog
   `notes` for micronutrient / composition context.
@@ -95,8 +97,3 @@ work on the expanded rows untouched, since those are ordinary `food_log` entries
 - **Correcting a catalog entry by message** — `corrections` deliberately covers the dated
   logs only. `save_food` overwrites an entry by name, but there's no way to *delete* a
   saved food (e.g. a duplicate) short of editing `data/food_catalog.jsonl` + rebuilding.
-
-## Pending data / quirks
-
-- Add **`a second salmon fillet`** (a second salmon distinct from the home fillet).
-- **Buckwheat** is stored as dry/uncooked values — log the dry weight.
