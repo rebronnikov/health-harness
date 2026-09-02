@@ -357,3 +357,37 @@ def test_harness_query_then_delete(ctx, catalog, fake_client):
 
     failed = fake_client.calls[2]["messages"][-1]["content"][0]
     assert failed["is_error"] is True and "No food_log row matches" in failed["content"]
+
+
+def test_editing_the_unit_alongside_the_amount_is_refused(ctx, catalog):
+    """`amount` drives the macro rescale and `amount_unit` was independently editable, so
+    "that was 30g, not a slice" ran 135.9 kcal through a factor of 30 and produced a 4077
+    kcal slice of bread. Changing the basis is a delete plus a fresh log, like a date."""
+    ctx(text="1 banana")
+    (row,) = food.log_food(DAY, "lunch", [{"name": "banana", "quantity": 1,
+                                           "unit": "each"}])["logged"]
+    key = {k: row[k] for k in ("date", "meal", "food_slug", "ingested_at")}
+    ctx(text="that was 30g, not a slice")
+    with pytest.raises(ValueError, match="amount_unit"):
+        corrections.edit_entry("food_log", key, row["ingested_at"],
+                               {"amount": 30, "amount_unit": "g"})
+    (stored,) = rows(get_conn(), "SELECT * FROM food_log")
+    assert stored["kcal"] == pytest.approx(row["kcal"])       # untouched
+
+
+def test_a_correction_reports_the_corrected_day(ctx, catalog):
+    """An amount edit moves a total the user has already been shown, and nothing else in
+    the turn fetches it — so without this the reply can only guess at the new number, and
+    the prompt forbids it from guessing."""
+    ctx(text="200g skyr")
+    (row,) = food.log_food(DAY, "snack", [{"name": "skyr", "quantity": 200,
+                                           "unit": "g"}])["logged"]
+    key = {k: row[k] for k in ("date", "meal", "food_slug", "ingested_at")}
+    ctx(text="that was 100g")
+    out = corrections.edit_entry("food_log", key, row["ingested_at"], {"amount": 100})
+    assert out["day_totals"]["kcal"] == pytest.approx(51.0)
+    assert "progress_block" in out["day_totals"]
+
+    ctx(text="scratch it")
+    gone = corrections.delete_entry("food_log", key, row["ingested_at"])
+    assert gone["day_totals"]["kcal"] == 0

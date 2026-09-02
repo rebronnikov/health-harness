@@ -131,3 +131,23 @@ def test_the_meal_question_is_conditional_on_the_result():
     assert "only when `needs_meal` comes back true" in meal
     assert "one message can write two meals" in meal
     assert "never infer it from the clock" in meal          # the old rule still stands
+
+
+def test_an_errored_tool_may_not_be_reported_as_a_log():
+    body = BODY
+    assert "ERROR" in body and "did NOT happen" in body
+    assert "NEVER answer one with 'Logged'" in body
+
+
+def test_no_figure_may_be_written_that_no_tool_returned_this_turn():
+    body = BODY
+    assert "no tool returned THIS turn" in body
+    assert "not a template to update" in body
+
+
+def test_the_reply_must_read_the_whole_result():
+    """A skipped duplicate and a macro mismatch are both reported IN the result, so a reply
+    that only checks for success misreports them."""
+    body = BODY
+    assert "duplicate_skipped" in body and "never report it as a second helping" in body
+    assert "macro_check" in body

@@ -89,6 +89,10 @@ PROGRESS_ROWS = (
 )
 
 DAY_HEADING = "Today so far"
+# The heading `propose_food_estimate` renders under: a projection is not a log, and the
+# heading is what stops the block being read as one. A constant because BLOCK_LINE below
+# has to know every heading this module can emit.
+PROJECTION_HEADING = "Would put today at"
 
 
 def render_progress(rem: dict, heading: str = DAY_HEADING) -> str:
@@ -186,6 +190,26 @@ SUGGEST_HEADINGS = {
 }
 DEFAULT_SUGGEST_HEADING = "To close the gaps"
 OVER_HEADING = "Doesn't quite fit"
+
+# What ONE LINE of a block rendered by this module looks like, for the harness's
+# fabrication check (`Feature.block_signature`). Two alternatives: a heading exactly, or a
+# macro row — `Calories: 1846 / 2200`, matched on the plain word and the `N / N` shape so a
+# swapped icon still matches and ordinary prose ("protein is the one to chase") does not.
+#
+# It exists because the verbatim-block repair is blind in the one case that matters most:
+# it compares the reply against blocks a tool RETURNED, so a turn where NO tool ran has an
+# empty comparison set and passes silently when no tool returned a block.
+BLOCK_LINE = re.compile(
+    r"^\s*(?:"
+    + "|".join(re.escape(h) for h in (
+        DAY_HEADING, PROJECTION_HEADING, DEFAULT_SUGGEST_HEADING, OVER_HEADING,
+        *SUGGEST_HEADINGS.values(),
+    ))
+    + r")\s*:?\s*$"
+    r"|(?:"
+    + "|".join(re.escape(label.partition(" ")[2]) for label, _, _ in PROGRESS_ROWS)
+    + r")\s*:\s*-?[\d.]+\s*\w*\s*/\s*-?[\d.]+"
+)
 
 # Icon, plain word and unit per macro, derived from PROGRESS_ROWS so the two blocks can
 # never disagree about what fibre is called or which icon it wears — editing that one

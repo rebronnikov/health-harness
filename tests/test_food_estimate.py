@@ -44,7 +44,7 @@ def test_confirm_writes_estimated_rows_with_original_provenance(ctx):
     ctx(text="two slices of pizza", reply_handle="c1")
     food.propose_food_estimate(DAY, "dinner", PIZZA)
     ctx(text="yes", reply_handle="c1")                            # a later, context-free turn
-    out = food.confirm_pending()
+    out = food.confirm_pending(expect_food="pizza slice")
     (logged,) = out["logged"]
     assert logged["estimated"] == 1
     assert logged["kcal"] == 285
@@ -56,16 +56,16 @@ def test_confirm_clears_pending(ctx):
     ctx(text="pizza", reply_handle="c1")
     food.propose_food_estimate(DAY, "dinner", PIZZA)
     ctx(text="yes", reply_handle="c1")
-    food.confirm_pending()
+    food.confirm_pending(expect_food="pizza slice")
     assert "c1" not in food._pending                              # slot consumed
     with pytest.raises(ValueError):                               # second confirm finds nothing
-        food.confirm_pending()
+        food.confirm_pending(expect_food="pizza slice")
 
 
 def test_confirm_with_nothing_pending_raises(ctx):
     ctx(text="yes", reply_handle="empty")
     with pytest.raises(ValueError, match="Nothing is pending"):
-        food.confirm_pending()
+        food.confirm_pending(expect_food="pizza slice")
     assert rows(get_conn(), "SELECT * FROM food_log") == []
 
 
@@ -90,7 +90,7 @@ def _confirm_pizza(ctx):
     ctx(text="two slices of pizza", reply_handle="c1")
     food.propose_food_estimate(DAY, "dinner", PIZZA)
     ctx(text="yes", reply_handle="c1")
-    return food.confirm_pending()
+    return food.confirm_pending(expect_food="pizza slice")
 
 
 def test_confirming_an_estimate_offers_to_save_it(ctx):
@@ -116,7 +116,7 @@ def test_a_weighed_food_is_offered_per_100g(ctx):
         "kcal": 188, "protein_g": 30.5, "carb_g": 0, "fat_g": 7.5, "fibre_g": 0}])
     ctx(text="looks right", reply_handle="c1")
 
-    (offer,) = food.confirm_pending()["catalog_offer"]
+    (offer,) = food.confirm_pending(expect_food="beef mince")["catalog_offer"]
     assert offer["ref_qty"] == 100 and offer["ref_unit"] == "g"
     assert offer["kcal"] == 125.33 and offer["protein_g"] == 20.33
     assert "per 100g" in food.log_system_context(_msg())
@@ -128,7 +128,7 @@ def test_no_offer_for_a_food_already_in_the_catalog(ctx, catalog):
         "name": "skyr", "quantity": 100, "unit": "g",
         "kcal": 51, "protein_g": 9, "carb_g": 3.4, "fat_g": 0.1, "fibre_g": 0}])
     ctx(text="yes", reply_handle="c1")
-    assert food.confirm_pending()["catalog_offer"] is None
+    assert food.confirm_pending(expect_food="skyr")["catalog_offer"] is None
     assert "SAVE OFFER" not in (food.log_system_context(_msg()) or "")
 
 

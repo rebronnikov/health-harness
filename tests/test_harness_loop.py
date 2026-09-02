@@ -11,7 +11,9 @@ from health.core import harness
 from health.core.contracts import NormalizedMessage
 from health.core.registry import all_executors, all_tools
 
-from conftest import DEFAULT_TS, raw_block, text_block, tool_block
+from health.store.connection import get_conn
+
+from conftest import DEFAULT_TS, raw_block, rows, text_block, tool_block
 
 DAY = "2026-07-14"
 
@@ -140,3 +142,28 @@ def test_loop_cap_reply_does_not_enter_history(fake_client):
     harness.handle(_msg("how am I doing?", ts=DEFAULT_TS + timedelta(seconds=30)))
 
     assert fake_client.calls[-1]["messages"] == [{"role": "user", "content": "how am I doing?"}]
+
+
+def test_a_paused_turn_still_dispatches_its_client_tools(fake_client, catalog):
+    paused = [raw_block("server_tool_use", id="srv-1", name="web_search",
+                        input={"query": "skyr nutrition"}),
+              tool_block("log_food", {"date": DAY, "meal": "snack",
+                                      "items": [{"name": "skyr", "quantity": 100,
+                                                 "unit": "g"}]}, id="tu-1")]
+    fake_client.script((paused, "pause_turn"), [text_block("Logged the skyr.")])
+
+    reply = harness.handle(_msg("100g skyr, and check the label"))
+
+    assert reply == "Logged the skyr."
+    (row,) = rows(get_conn(), "SELECT * FROM food_log")
+    assert row["food_slug"] == "skyr" and row["kcal"] == 51.0
+    # The tool_result has to go back, or the resumed request carries an orphaned tool_use.
+    assert fake_client.calls[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+
+
+def test_the_loop_cap_does_not_claim_nothing_was_written():
+    """It said "nothing further was executed", which reads as "nothing was executed" — and
+    the obvious response, re-sending, double-counts everything that landed in the twelve
+    iterations before the cap."""
+    assert "may" in harness.LOOP_LIMIT_REPLY and "/today" in harness.LOOP_LIMIT_REPLY
+    assert "nothing" not in harness.LOOP_LIMIT_REPLY.lower()

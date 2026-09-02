@@ -18,8 +18,8 @@ from health.config import MODEL
 from health.core import history
 from health.core.contracts import NormalizedMessage, current_message
 from health.core.prompts import STATIC_PROMPT, clock_line
-from health.core.registry import (all_executors, all_tools, system_context_fragments,
-                                  verbatim_block_keys)
+from health.core.registry import (all_executors, all_tools, block_signatures,
+                                  system_context_fragments, verbatim_block_keys)
 from health.store import msg_log
 
 log = logging.getLogger(__name__)
@@ -87,9 +87,20 @@ FAILSAFE_REPLY = (
     "Please re-send that."
 )
 
+# "nothing further was executed" was read as "nothing was executed", and the obvious
+# response — re-send it — double-counts everything that DID land in the twelve iterations
+# before the cap. Say which way the risk runs.
 LOOP_LIMIT_REPLY = (
-    "I hit my internal tool-call limit on that one \N{EM DASH} nothing further was "
-    "executed. Check what landed with a quick question, then re-send the rest."
+    "I hit my internal tool-call limit on that one and stopped part-way. Some of it may "
+    "already be logged, so check with /today before re-sending \N{EM DASH} sending it "
+    "again would count anything that landed twice."
+)
+
+# Appended when a reply carried rendered-block lines no tool produced. It has to say the
+# tool did not write the record, including turns where no tool ran.
+FABRICATION_NOTE = (
+    "\n\n\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Ignore any totals above \N{EM DASH} I "
+    "reported numbers no tool actually produced, so that was NOT logged. Please re-send it."
 )
 
 # How many search hits to keep per result block. A search returns ten-ish, and the point
@@ -200,19 +211,27 @@ def _collect_blocks(out, keys: frozenset, into: list) -> None:
             _collect_blocks(v, keys, into)
 
 
-def _restore_blocks(reply: str, blocks: list) -> str:
-    """Put back any rendered block line the reply altered.
+def _enforce_blocks(reply: str, blocks: list, signatures: list) -> str:
+    """Make the reply's rendered blocks match what the tools actually returned.
 
-    A reply can preserve the figures while swapping icons.
-    Harmless-looking, but it defeats the block's only purpose — the user compares days at a
-    glance — and it compounds, because history.save then stores the mutated reply and feeds
-    it back, so one drift holds for the whole session.
+    Two jobs, and the second is why this replaced a repair-only pass.
 
-    Matching is line-wise on the ASCII skeleton, so a swapped or dropped icon is repaired
-    while a line whose NUMBERS differ simply doesn't match and is left alone: if the model
-    meant something else there, that is a bug to see, not to paper over. Anything still not
-    verbatim afterwards is logged rather than rewritten further — a detector, like
-    report_usage's hit% column, not a licence to overwrite prose.
+    REPAIR. A reply can retain the figures while swapping or dropping icons. Harmless-looking, but it defeats the block's only purpose —
+    the user compares days at a glance — and it compounds, because history.save then stores
+    the mutated reply and feeds it back, so one drift holds for the whole session. Matching
+    is line-wise on the ASCII skeleton, so a swapped or dropped icon is repaired.
+
+    STRIP. A line that LOOKS like a rendered block line (it matches a feature's
+    `block_signature`) but matches no line any tool returned this turn was not reproduced —
+    it was typed. That covers both a real drift in the numbers and, far worse, a block
+    invented when no tool ran or a tool refused to write.
+    The repair pass was structurally blind to it — with no tool result there is nothing to
+    compare against, so it neither fixed nor warned. Those lines are dropped and the reply
+    is told to disown them, because a plausible wrong total is worse than no total: the
+    user is running a deficit off these numbers and cannot audit them by eye.
+
+    Stripping is deliberately confined to lines a feature has claimed. Prose is never
+    touched, and a block the reply legitimately omits costs nothing.
     """
     canon = {}
     for b in blocks:
@@ -220,27 +239,36 @@ def _restore_blocks(reply: str, blocks: list) -> str:
             key = _line_key(line)
             if key:
                 canon.setdefault(key, line)
-    if not canon:
-        return reply
-    out, fixed = [], 0
+
+    kept, fixed, dropped = [], 0, []
     for line in reply.split("\n"):
-        want = canon.get(_line_key(line))
-        if want is not None and want != line:
-            line, fixed = want, fixed + 1
-        out.append(line)
-    repaired = "\n".join(out)
+        key = _line_key(line)
+        want = canon.get(key)
+        if want is not None:
+            if want != line:
+                fixed += 1
+            kept.append(want)
+            continue
+        if key and any(sig.search(line) for sig in signatures):
+            dropped.append(line)
+            continue
+        kept.append(line)
+
     if fixed:
         log.warning("restored %d rendered block line(s) the reply had altered", fixed)
-    # Only a block the reply PARTLY used is worth a warning. A turn often returns a block
-    # the reply legitimately omits — propose_food_estimate hands back a projection the
-    # model may not show — and warning on those would bury the real signal.
-    for b in blocks:
-        if b in repaired:
-            continue
-        keys = {_line_key(x) for x in b.split("\n") if _line_key(x)}
-        if keys & {_line_key(x) for x in repaired.split("\n")}:
-            log.warning("a rendered block reached the reply altered beyond line repair")
-    return repaired
+    if not dropped:
+        return "\n".join(kept)
+
+    log.error(
+        "stripped %d fabricated block line(s) from a reply (%d block(s) returned this "
+        "turn): %s", len(dropped), len(blocks), " | ".join(dropped[:6]),
+    )
+    # Collapse the blank lines the dropped rows left behind, so the reply doesn't read as
+    # if something is missing — something IS missing, and the note is what says so.
+    return _BLANK_RUN.sub("\n\n", "\n".join(kept)).strip() + FABRICATION_NOTE
+
+
+_BLANK_RUN = re.compile(r"\n{3,}")
 
 
 def handle(msg: NormalizedMessage) -> str:
@@ -265,6 +293,7 @@ def handle(msg: NormalizedMessage) -> str:
         tools, execs = all_tools() + SERVER_TOOLS, all_executors()
         # Rendered texts returned this turn, to be restored into the reply below.
         block_keys, blocks = verbatim_block_keys(), []
+        signatures = block_signatures()
 
         # web_search_20260209 filters its results inside a server-side code-execution
         # container, so a turn that searched carries a container id that EVERY later
@@ -299,16 +328,23 @@ def handle(msg: NormalizedMessage) -> str:
             # message starts a fresh one.
             container = getattr(getattr(resp, "container", None), "id", None) or container
 
-            if stop == "pause_turn":
+            # Only client tools are dispatched here: `server_tool_use` and
+            # `web_search_tool_result` blocks are a different type, so they fall through
+            # to the model untouched (server-tool errors are in-band and model-facing).
+            #
+            # Computed BEFORE the pause_turn branch, which used to `continue` past it: a
+            # turn can carry a client tool_use alongside a paused server tool (the
+            # 2026-07-26 container_id note records the two co-occurring), and skipping the
+            # dispatch left the call unanswered — the food it would have logged never
+            # written, and an unresolved tool_use re-sent to the API.
+            tool_uses = [b for b in resp.content if b.type == "tool_use"]
+
+            if stop == "pause_turn" and not tool_uses:
                 # A server-side tool (web search) paused mid-answer. Re-sending the
                 # paused turn resumes it where it left off; no user turn is injected.
                 # Read as a final response it would ship a truncated reply.
                 continue
 
-            # Only client tools are dispatched here: `server_tool_use` and
-            # `web_search_tool_result` blocks are a different type, so they fall through
-            # to the model untouched (server-tool errors are in-band and model-facing).
-            tool_uses = [b for b in resp.content if b.type == "tool_use"]
             if not tool_uses:
                 if stop == "max_tokens":
                     log.warning("reply truncated at MAX_TOKENS=%s", MAX_TOKENS)
@@ -322,7 +358,7 @@ def handle(msg: NormalizedMessage) -> str:
                     return FAILSAFE_REPLY
                 # Before history and the transcript, so the stored reply is the canonical
                 # one — otherwise a drift is recalled next turn and reproduced faithfully.
-                reply = _restore_blocks(reply, blocks)
+                reply = _enforce_blocks(reply, blocks, signatures)
                 history.save(msg, reply)     # text only — never the tool blocks above
                 msg_log.outbound(msg, reply)
                 return reply

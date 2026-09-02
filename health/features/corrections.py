@@ -36,7 +36,7 @@ from datetime import timedelta
 from typing import Any
 
 from health.core.contracts import Feature, get_context
-from health.features.food import UNLABELLED_MEAL, normalise_meal
+from health.features.food import UNLABELLED_MEAL, get_day_totals, normalise_meal
 from health.store import writer
 from health.store.connection import get_conn
 
@@ -62,6 +62,12 @@ _SUMMARY_COLUMNS = {
 _PROPORTIONAL = {
     "food_log": ("amount", ("kcal", "protein_g", "carb_g", "fat_g", "fibre_g")),
 }
+
+# Columns that define what the driver MEANS, so rescaling across them is meaningless.
+# `amount` 1 -> 30 is thirty times as much bread only while the unit stays `each`; as
+# "1 each -> 30 g" it is less bread, and the automatic rescale returned 4077 kcal for a
+# slice. Changing the basis is a delete plus a fresh log, exactly like moving a date.
+_FIXED_ALONGSIDE_DRIVER = {"food_log": ("amount_unit",)}
 
 
 # --- what can be corrected --------------------------------------------------
@@ -263,6 +269,19 @@ def recent_entries(days: int = 1, limit: int = RECENT_LIMIT,
     }
 
 
+def _day_view(domain: str, row: dict) -> dict:
+    """The corrected day, for domains that have one.
+
+    A correction is the one write that changes a total the user has already been shown, so
+    the reply has to be able to state the new one — and it can only do that from a tool
+    result. Keyed off the row rather than hardcoded, so a future dated domain that grows a
+    day view is one line here and nothing in the core.
+    """
+    if domain != "food_log" or "date" not in row:
+        return {}
+    return {"day_totals": get_day_totals(row["date"])}
+
+
 def edit_entry(domain: str, key: dict, ingested_at: str, changes: dict) -> dict:
     conn = get_conn()
     feature = _feature(domain)
@@ -279,6 +298,15 @@ def edit_entry(domain: str, key: dict, ingested_at: str, changes: dict) -> dict:
             "it again."
         )
 
+    fixed = [c for c in _FIXED_ALONGSIDE_DRIVER.get(domain, ()) if c in changes]
+    if fixed:
+        raise ValueError(
+            f"{fixed} can't be edited on {domain}: it is the basis the amount is measured "
+            "in, and the macros are rescaled from the amount, so changing both at once "
+            "produces nonsense (1 slice -> 30 g rescaled a sourdough row to 4077 kcal). "
+            "Delete the row and log it again with the right unit."
+        )
+
     resolved = _rescale(domain, row, dict(changes))
     stored = writer.record("corrections", {
         "action": "edit",
@@ -288,7 +316,11 @@ def edit_entry(domain: str, key: dict, ingested_at: str, changes: dict) -> dict:
         "changes": resolved,
     })
     return {"edited": {**row, **resolved}, "applied": resolved,
-            "correction_at": stored["ingested_at"]}
+            "correction_at": stored["ingested_at"],
+            # An amount edit moves the day's totals, and nothing else in the turn will
+            # fetch them — without this the reply reports the row and leaves the user to
+            # guess what it did to the day.
+            **_day_view(domain, row)}
 
 
 def set_meal(date: str, meal: str) -> dict:
@@ -351,7 +383,8 @@ def delete_entry(domain: str, key: dict, ingested_at: str) -> dict:
         "target_ingested_at": ingested_at,
         "changes": None,
     })
-    return {"deleted": row, "correction_at": stored["ingested_at"]}
+    return {"deleted": row, "correction_at": stored["ingested_at"],
+            **_day_view(domain, row)}
 
 
 # --- projection (the sanctioned non-upsert; used by live ingest AND rebuild_db) ---

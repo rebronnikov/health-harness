@@ -4,6 +4,7 @@ there are no cycles.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -52,6 +53,17 @@ class Feature:
                                              # rendered text that must reach the user byte for
                                              # byte. The harness restores any the reply retyped.
                                              # A reply can swap icons while preserving the figures.
+    block_signature: re.Pattern | None = None
+                                             # optional regex matching ONE LINE of this feature's
+                                             # rendered blocks (a row or a heading). It is how the
+                                             # harness tells "the model reproduced a block" from
+                                             # "the model typed a block no tool produced": a line
+                                             # that matches but is absent from this turn's tool
+                                             # results is fabricated and gets stripped. Needed
+                                             # because verbatim_blocks alone cannot see the worst
+                                             # case — when NO tool ran there is no block to
+                                             # compare against, which is exactly how five replies
+                                             # in 2026-08 reported food that was never written.
     system_context: Callable[[Any], str | None] | None = None
                                              # optional per-message system-prompt fragment, given
                                              # the in-flight NormalizedMessage. Lets a feature

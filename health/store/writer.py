@@ -26,6 +26,13 @@ SCHEMA_VERSION = 1
 _lock = threading.Lock()
 
 
+def now() -> datetime:
+    """The ingest clock. One function so anything comparing against an `ingested_at` reads
+    the SAME clock that stamped it — food's duplicate window does, and a second source of
+    time there would silently never match under a patched clock (or a clock skew)."""
+    return datetime.now(timezone.utc)
+
+
 def record(domain: str, fields: dict, raw: str | None = None) -> dict:
     """Append one canonical row to data/<domain>.jsonl, upsert it into the SQLite
     projection, and log provenance. Returns the stored row for the executor to echo.
@@ -48,7 +55,7 @@ def record(domain: str, fields: dict, raw: str | None = None) -> dict:
         "schema_version": SCHEMA_VERSION,
         **fields,
         "raw": raw,
-        "ingested_at": datetime.now(timezone.utc).isoformat(),
+        "ingested_at": now().isoformat(),
         "source": ctx.source,
     }
     dedupe = feature.dedupe_value(row)

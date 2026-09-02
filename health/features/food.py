@@ -31,8 +31,10 @@ a later "make it 40g" adds a row rather than replacing one. See ROADMAP.md.
 """
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
+from datetime import datetime, timedelta
 from typing import Any
 
 from health.core import history
@@ -40,6 +42,8 @@ from health.core.contracts import Feature, get_context
 from health.features import targets
 from health.store import writer
 from health.store.connection import get_conn
+
+log = logging.getLogger(__name__)
 
 CATALOG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS food_catalog (
@@ -98,7 +102,22 @@ def _slug(name: str) -> str:
 
 
 def _norm_unit(unit: str) -> str:
-    return _UNIT_ALIASES.get((unit or "").strip().lower(), (unit or "").strip().lower())
+    """Map a unit onto g/ml/each, or refuse it.
+
+    It used to pass anything through lowercased, so `tbsp` stayed `tbsp` — which misses
+    every catalog lookup and, on the save path, freezes a unit nothing can ever scale.
+    The tool schema has an enum, but a schema is a request, not an enforcement.
+    """
+    raw = (unit or "").strip().lower()
+    known = _UNIT_ALIASES.get(raw)
+    if known is None:
+        raise ValueError(
+            f"{unit!r} is not a unit this log understands. Use 'g' for mass, 'ml' for "
+            "volume or 'each' for countable items, converting the amount yourself is NOT "
+            "allowed — if the user gave tablespoons or cups, estimate the grams and say "
+            "that is what you assumed. Nothing was logged."
+        )
+    return known
 
 
 def _lookup_catalog(conn: sqlite3.Connection, slug: str) -> dict | None:
@@ -108,6 +127,36 @@ def _lookup_catalog(conn: sqlite3.Connection, slug: str) -> dict | None:
         (slug,),
     ).fetchone()
     return dict(row) if row is not None else None
+
+
+# Skip a recent matching write when a confirmation repeats an earlier item.
+_DUPLICATE_WINDOW = timedelta(seconds=120)
+
+
+def _recent_duplicate(conn: sqlite3.Connection, date: str, slug: str, meal: str,
+                      amount: float, unit: str, now: datetime) -> dict | None:
+    """The identical row this one would duplicate, if it was written moments ago.
+
+    `food_log` is append-per-event on purpose — its dedupe key carries `ingested_at` so a
+    second helping ADDS rather than overwrites — which leaves nothing to stop the model
+    writing the same food twice. A confirmation may restate the earlier message. The window keeps a genuine later helping loggable.
+    """
+    row = conn.execute(
+        "SELECT ingested_at, kcal FROM food_log "
+        "WHERE date = ? AND food_slug = ? AND meal = ? AND amount = ? AND amount_unit = ? "
+        "ORDER BY ingested_at DESC LIMIT 1",
+        (date, slug, meal, amount, unit),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        written = datetime.fromisoformat(row["ingested_at"])
+    except (TypeError, ValueError):          # a hand-edited row must not break ingest
+        return None
+    if now - written > _DUPLICATE_WINDOW:
+        return None
+    return {"ingested_at": row["ingested_at"], "kcal": row["kcal"],
+            "seconds_ago": round((now - written).total_seconds())}
 
 
 def _day_totals(conn: sqlite3.Connection, date: str) -> dict:
@@ -226,6 +275,17 @@ def _accumulate(acc: dict, slug: str, name: str, amount: float, unit: str,
 
 def _save_catalog(name: str, ref_qty: float, ref_unit: str, macros: dict,
                   notes: str = "") -> dict:
+    # Every log of this food divides by ref_qty. A zero makes the whole evening raise
+    # (the suggestion pass divides by it too) AFTER rows have already committed, so the
+    # model sees "nothing was logged" and retries into duplicates; a negative silently
+    # inverts the macros. Refuse at the door — this is the one value in the catalog that
+    # cannot be corrected later by logging over it.
+    if not ref_qty > 0:
+        raise ValueError(
+            f"{name!r} cannot be saved with ref_qty={ref_qty!r}: the reference portion is "
+            "what every future log is scaled by, so it must be a positive number "
+            "(100 for a per-100g label, 1 for a counted item). Nothing was saved."
+        )
     return writer.record("food_catalog", {
         "slug": _slug(name), "name": name,
         "ref_qty": float(ref_qty), "ref_unit": _norm_unit(ref_unit),
@@ -260,6 +320,93 @@ def _unresolved_reason(cat: sqlite3.Row | None, unit: str) -> str:
     )
 
 
+# Atwater factors: kcal per gram of each macro (EU labelling also credits fibre at 2).
+# Used only to sanity-check numbers, never to compute them.
+_ATWATER = {"protein_g": 4, "carb_g": 4, "fat_g": 9, "fibre_g": 2}
+# How far a stated kcal may sit from what its own macros imply before it is worth saying
+# out loud. BOTH bounds must trip, so rounding on a small portion stays quiet.
+_MACRO_CHECK_FRACTION = 0.25
+_MACRO_CHECK_KCAL = 60
+
+
+def _macro_check(name: str, macros: dict) -> dict | None:
+    """Flag a set of macros whose calories don't add up, for the reply to query.
+
+    Nothing else in the pipeline ever looks at whether numbers are *possible* — a label
+    read wrong, or half-copied, is stored verbatim. A portion's calories and per-100g macros can otherwise appear together in one row. A warning, never a refusal — the user's own number wins if they
+    confirm it, and blocking a log to argue about arithmetic is worse than logging it.
+    """
+    kcal = macros["kcal"]
+    if kcal <= 0:
+        return None                          # a zero-calorie food has nothing to reconcile
+    implied = sum(macros[k] * f for k, f in _ATWATER.items())
+    gap = kcal - implied
+    if abs(gap) <= _MACRO_CHECK_KCAL or abs(gap) / kcal <= _MACRO_CHECK_FRACTION:
+        return None
+    return {"food_name": name, "stated_kcal": round(kcal, 1),
+            "implied_by_macros_kcal": round(implied, 1), "difference_kcal": round(gap, 1),
+            "note": ("the calories and the macros disagree — one of them is probably stated "
+                     "per a different amount")}
+
+
+def _given_macros(name: str, it: dict) -> dict | None:
+    """The five macros off one item, or None if it carries none of them.
+
+    All-or-nothing on purpose. `fibre_g` is not in the schema's `required` list, so an item
+    giving four of five used to fall through to the catalog branch and be logged with STALE
+    CATALOG MACROS, silently discarding the numbers the user had just read off a label —
+    no error, no `unresolved`, nothing to notice. Partial input is a mistake to name, not
+    a value to guess at.
+    """
+    present = [k for k in _MACROS if it.get(k) is not None]
+    if not present:
+        return None
+    missing = [k for k in _MACROS if k not in present]
+    if missing:
+        raise ValueError(
+            f"{name!r} gave {', '.join(present)} but not {', '.join(missing)}. Macros are "
+            "all-or-nothing: pass all five (0 for any the user did not state), or pass none "
+            "and let the catalog supply them. Nothing was logged."
+        )
+    return {k: float(it[k]) for k in _MACROS}
+
+
+def _macros_reference(name: str, it: dict, amount: float, unit: str) -> float:
+    """The amount the user's macros were stated per.
+
+    Defaulting this to the eaten amount reads per-unit macros as a total, which halves the
+    count when the stated value is per item.
+    The reference is required whenever the quantity isn't 1, where "per one" and "per all of them"
+    are different numbers and only the model knows which the user meant.
+    """
+    ref = it.get("macros_ref_qty")
+    if ref is None:
+        if amount == 1:
+            return amount                    # per-one and per-all are the same number
+        raise ValueError(
+            f"{name!r} has user-given macros for {amount:g} {unit}, so macros_ref_qty is "
+            f"required: pass {amount:g} if those numbers cover the whole amount, or the "
+            "amount they were stated per (1 for per-item, 100 for a per-100g label). "
+            "Nothing was logged."
+        )
+    ref = float(ref)
+    if ref <= 0:
+        raise ValueError(f"{name!r} has macros_ref_qty={ref:g}; it must be positive, and "
+                         "0 is not the same as omitting it. Nothing was logged.")
+    if unit == "each" and ref > _MAX_EACH_REFERENCE:
+        # A per-100g label pinned to a counted food divides every future log by 100 — and
+        # with `save`, freezes that into the catalog as "per 100 each".
+        raise ValueError(
+            f"{name!r} is counted in `each` but macros_ref_qty is {ref:g}. That reads as "
+            f"'per {ref:g} items'. If those macros are per 100g, log this food in grams "
+            "instead. Nothing was logged."
+        )
+    return ref
+
+
+_MAX_EACH_REFERENCE = 12     # nobody states macros per a hundred slices
+
+
 def log_food(date: str, meal: str | None = None, items: list[dict] | None = None) -> dict:
     # `meal` is optional (an unnamed meal logs as `unlabelled` and the bot asks), which
     # forces `items` to carry a default too — Python won't allow a required argument after
@@ -268,19 +415,23 @@ def log_food(date: str, meal: str | None = None, items: list[dict] | None = None
     conn = get_conn()
     resolved: dict[str, dict] = {}
     unresolved: list[dict] = []
+    repeatable: set[str] = set()             # slugs the model explicitly marked as repeats
+    checks: list[dict] = []                  # macros whose calories don't add up
 
     for it in items:
         name = it["name"]
         slug = _slug(name)
         amount = float(it["quantity"])
         unit = _norm_unit(it.get("unit", "each"))
-        has_macros = all(it.get(k) is not None for k in _MACROS)
+        given = _given_macros(name, it)
 
-        if has_macros:
-            given = {k: float(it[k]) for k in _MACROS}
+        if given is not None:
             # Macros may be stated per a reference amount other than the one eaten
             # ("per 100g ... I ate 63g") — the scaling happens here, never in the model.
-            ref_qty = float(it.get("macros_ref_qty") or amount)
+            ref_qty = _macros_reference(name, it, amount, unit)
+            flag = _macro_check(name, given)
+            if flag is not None:
+                checks.append(flag)
             factor = amount / ref_qty
             macros = {k: v * factor for k, v in given.items()} if factor != 1 else given
             catalog_slug = None
@@ -296,15 +447,32 @@ def log_food(date: str, meal: str | None = None, items: list[dict] | None = None
             macros = {k: cat[k] * factor for k in _MACROS}
             catalog_slug = cat["slug"]
 
+        if it.get("allow_duplicate"):
+            repeatable.add(slug)
         _accumulate(resolved, slug, name, amount, unit, macros, catalog_slug)
 
     # Resolved per item, not once for the call: a food with a fixed label takes it even
     # when the message names a meal, so one message can legitimately write two meals.
-    logged = [
-        writer.record("food_log",
-                      {"date": date, "meal": _resolve_meal(slug, meal), "estimated": 0, **fields})
-        for slug, fields in resolved.items()
-    ]
+    now = writer.now()                        # the same clock writer.record stamps rows with
+    logged, duplicates = [], []
+    for slug, fields in resolved.items():
+        row_meal = _resolve_meal(slug, meal)
+        prior = (None if slug in repeatable else
+                 _recent_duplicate(conn, date, slug, row_meal,
+                                   fields["amount"], fields["amount_unit"], now))
+        if prior is not None:
+            # Refusing here rather than in the model is the point: the model cannot see
+            # what it wrote last turn (history is text only), so it cannot know this is a
+            # repeat. Reported, never silent — a genuine second helping comes back with
+            # allow_duplicate.
+            log.warning("skipped a duplicate %s logged %ss ago on %s",
+                        slug, prior["seconds_ago"], date)
+            duplicates.append({"food_name": fields["food_name"], "meal": row_meal,
+                               "amount": fields["amount"], "amount_unit": fields["amount_unit"],
+                               **prior})
+            continue
+        logged.append(writer.record(
+            "food_log", {"date": date, "meal": row_meal, "estimated": 0, **fields}))
     # A committed log supersedes any pending estimate for the same food (e.g. the user
     # answered a proposal with real macros) — drop it so a later "yes" can't double-log.
     pend = _pending.get(get_context().reply_handle)
@@ -313,6 +481,13 @@ def log_food(date: str, meal: str | None = None, items: list[dict] | None = None
         if not pend["rows"]:
             _pending.pop(get_context().reply_handle, None)
     return {"logged": logged, "unresolved": unresolved,
+            # Not an error: the food IS on the day already. The reply has to say so rather
+            # than claim a second helping was logged, and re-call with the item's
+            # `allow_duplicate` if the user really did eat it twice.
+            "duplicate_skipped": duplicates,
+            # Logged anyway — see _macro_check. The reply is what turns this into a
+            # question the user can answer.
+            "macro_check": checks,
             # Plural because the rows may not agree — a single value would be wrong on any
             # morning a breakfast list carries a supplement. Each row also states its own.
             "meals": sorted({r["meal"] for r in logged}),
@@ -331,11 +506,22 @@ def propose_food_estimate(date: str, meal: str | None = None,
         "catalog_slug": None,
         **{k: float(it[k]) for k in _MACROS},
     } for it in items]
+    # Two calls in ONE turn are a legitimate shape — the model splits a mixed dish, or
+    # proposes a second food after logging a first — and this used to assign, so the
+    # earlier food was destroyed while the reply named both and the user's "yes" committed
+    # only the survivor. Merge instead; across turns the newer proposal still replaces the
+    # old one, which is what "the chat has one slot" has always meant.
+    prior = _pending.get(ctx.reply_handle)
+    if prior is not None and prior["proposed_in"] is ctx:
+        kept = [r for r in prior["rows"] if r["food_slug"] not in {n["food_slug"] for n in rows}]
+        rows = kept + rows
+        date, meal = prior["date"], meal if meal is not None else prior["meal"]
     _pending[ctx.reply_handle] = {
         "date": date, "meal": meal, "rows": rows, "original_raw": ctx.text or "",
         "proposed_in": ctx,  # identity of the proposing message; same turn ⇔ same object
         "proposed_at": ctx.timestamp,   # so an abandoned proposal goes stale, see _guard_fresh
     }
+    checks = [c for c in (_macro_check(r["food_name"], r) for r in rows) if c]
     current = _day_totals(get_conn(), date)
     projected = {
         "date": date,
@@ -344,7 +530,11 @@ def propose_food_estimate(date: str, meal: str | None = None,
     # A projection is not a log — the heading says so, so the block can't be mistaken for
     # what has actually been written.
     return {"pending": rows,
-            "projected_day_totals": _status(projected, date, heading="Would put today at"),
+            "projected_day_totals": _status(projected, date,
+                                            heading=targets.PROJECTION_HEADING),
+            # An estimate whose own numbers don't add up is worth catching BEFORE the user
+            # confirms it — that is the one moment they are looking at the figures.
+            "macro_check": checks,
             "needs_confirmation": True}
 
 
@@ -362,8 +552,10 @@ def confirm_pending(meal: str | None = None, expect_food: str | None = None) -> 
             "staged by propose_food_estimate — if you showed the user numbers without "
             "calling it, call it now and let their NEXT message confirm."
         )
-    _guard_expected_food(pend, expect_food)
+    # Freshness first: a proposal older than the conversation is dead whatever it was
+    # aimed at, and saying so is more useful than complaining about the argument.
     _guard_fresh(handle, pend, ctx)
+    _guard_expected_food(pend, expect_food)
     if pend["proposed_in"] is ctx and not _user_has_seen(pend, ctx):
         # A same-turn proposal must stay pending until the user sees and confirms it.
         raise ValueError(
@@ -548,11 +740,43 @@ def _describe(pend: dict) -> str:
                      f"({r['kcal']:g} kcal)" for r in pend["rows"])
 
 
+# Words too generic to identify a food on their own: every other salad matches "salad".
+# Overlap is measured on what's left, so "beetroot salad" and "pear salad" don't match.
+_GENERIC_FOOD_WORDS = frozenset((
+    "a", "and", "of", "the", "with", "in", "on", "salad", "bowl", "dish", "mix", "mixed",
+    "plate", "portion", "serving", "style", "fresh", "home", "homemade", "small", "large",
+))
+
+
+def _food_tokens(name: str) -> frozenset[str]:
+    return frozenset(_slug(name).split("_")) - _GENERIC_FOOD_WORDS
+
+
+def _names_same_food(expect: str, pending_name: str) -> bool:
+    """Is `expect` the same food as `pending_name`?
+
+    Exact slug first. Failing that, a shared distinctive word is enough, so a shortened name can still identify a longer saved description.
+    """
+    if _slug(expect) == _slug(pending_name):
+        return True
+    wanted = _food_tokens(expect)
+    return bool(wanted and wanted & _food_tokens(pending_name))
+
+
 def _guard_expected_food(pend: dict, expect_food: str | None) -> None:
-    """Require a matching food name before confirming a pending estimate."""
+    """Refuse a confirmation aimed at a food that isn't the one pending.
+
+    `confirm_pending` commits whatever occupies the chat's single slot, so a proposal the
+    user walked away from is committed by the next "yes" meant for something else. Requiring the intended food turns a mismatched confirmation into a refusal.
+    """
     if not expect_food:
-        return
-    if _slug(expect_food) not in {r["food_slug"] for r in pend["rows"]}:
+        raise ValueError(
+            f"expect_food is required and was not passed. The pending estimate is "
+            f"{_describe(pend)} — nothing was logged. Call confirm_pending again naming the "
+            "food you believe the user just confirmed, so a mismatch refuses instead of "
+            "committing the wrong one."
+        )
+    if not any(_names_same_food(expect_food, r["food_name"]) for r in pend["rows"]):
         raise ValueError(
             f"The pending estimate is {_describe(pend)}, not {expect_food!r} — nothing was "
             "logged. If you meant a different food, propose_food_estimate it first; if you "
@@ -564,6 +788,9 @@ def _guard_fresh(handle: Any, pend: dict, ctx) -> None:
     """Drop and refuse a proposal older than the conversation that produced it."""
     if ctx.timestamp - pend["proposed_at"] > PENDING_EXPIRY:
         _pending.pop(handle, None)
+        # The food is now unrecoverable from process state; the log is the only record
+        # that it was ever offered, so an audit can tell "never eaten" from "lost".
+        log.warning("dropped a stale pending estimate: %s", _describe(pend))
         raise ValueError(
             f"The pending estimate ({_describe(pend)}) is too old to confirm and has been "
             "dropped; nothing was logged. Propose it again if the user still wants it."
@@ -672,7 +899,10 @@ def _pending_section(msg) -> str | None:
         "confirm_pending, passing expect_food so a mismatch is caught. If it confirms it "
         "but names a different meal ('log it for lunch'), pass that as confirm_pending's "
         "`meal` — that is the whole change, not a reason to re-propose. If it amends the "
-        "NUMBERS or the amount, call propose_food_estimate again with the corrected values."
+        "NUMBERS or the amount, call propose_food_estimate again with the corrected values. "
+        "If it does NONE of those — the user has moved on to something else — say in ONE "
+        "short line at the end of your reply that this food is still NOT logged and you "
+        "need a yes. An unanswered estimate is written nowhere and expires silently."
     )
 
 
@@ -818,9 +1048,15 @@ LOG_TOOLS = [
             "and no user-given macros — use propose_food_estimate instead. Any item that couldn't be "
             "resolved from the catalog comes back in `unresolved` as {name, reason}; do what the "
             "reason says (estimate and propose it, or re-log it with a compatible amount) rather "
-            "than asking the user about it. "
+            "than asking the user about it. An item identical to one logged moments ago is NOT "
+            "written again and comes back in `duplicate_skipped` — say it was already on the day "
+            "rather than claiming you logged it twice; only re-send it with `allow_duplicate` if "
+            "the user says they really ate it again. "
             "Prefer the user's SAVED FOODS: if a mention matches one, pass its exact catalog "
             "name (and a compatible unit) so its stored macros are used rather than estimated. "
+            "If a food's calories disagree with its own macros it is still logged, and comes "
+            "back in `macro_check` — that is usually one figure stated per a different amount, "
+            "and it is worth your one question. "
             "Never do arithmetic — pass quantities and any user-given macros verbatim. If the "
             "user stated the macros per a reference amount different from what they ate (e.g. "
             "'per 100g ... I ate 63g'), also pass that reference amount as `macros_ref_qty` — "
@@ -842,9 +1078,10 @@ LOG_TOOLS = [
                             "protein_g": {"type": "number"},
                             "carb_g": {"type": "number"},
                             "fat_g": {"type": "number"},
-                            "fibre_g": {"type": "number", "description": "Grams of dietary fibre; include with the other macros when the user gave them (0 if not stated)."},
-                            "macros_ref_qty": {"type": "number", "description": "Only with user-given macros: the reference amount (in `unit`) the macros were stated per, when it differs from `quantity` (e.g. 100 for 'per 100g' when they ate 63g). Omit when the macros describe the eaten amount."},
+                            "fibre_g": {"type": "number", "description": "Grams of dietary fibre. Macros are ALL-OR-NOTHING: if you pass any of kcal/protein_g/carb_g/fat_g you must pass all five, using 0 for any the user did not state. A partial set is refused, because it used to fall through to the catalog and silently discard the user's own numbers."},
+                            "macros_ref_qty": {"type": "number", "description": "With user-given macros, the amount (in `unit`) those macros were stated per: 100 for a 'per 100g' label, 1 for per-item, or `quantity` itself when they cover the whole portion. REQUIRED whenever quantity is not 1 — 'two lattes, 83 kcal' means something different per-latte than in total, and guessing halved the count on real logs."},
                             "save": {"type": "boolean", "description": "True only if the user asked to remember this food; the macro reference portion (macros_ref_qty if given, else quantity) becomes its catalog reference portion."},
+                            "allow_duplicate": {"type": "boolean", "description": "Only when the user genuinely ate the same food, same amount, same meal AGAIN within a couple of minutes and says so. Identical rows that close together are otherwise skipped and reported in `duplicate_skipped`, because they are almost always this tool being called twice for one message."},
                         },
                         "required": ["name", "quantity", "unit"],
                     },
@@ -901,15 +1138,16 @@ LOG_TOOLS = [
             "LATER user message confirms it — never in the same turn that proposed it, unless "
             "your PREVIOUS reply already showed the user these exact numbers and this message "
             "agrees to them. A same-turn call the user has not seen is refused and logs nothing. "
-            "The logged rows are marked as estimated."
+            "You MUST pass expect_food naming what you are confirming, and pass `meal` if the "
+            "user named one while confirming. The logged rows are marked as estimated."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "meal": {"type": "string", "description": "Only if the user names a meal when confirming, or corrects the one the estimate was proposed under ('log it for lunch'). Overrides the pending estimate's meal; omit to keep it. Pass the label exactly as given; repeats are not numbered, so two 'breakfast' messages are one breakfast."},
-                "expect_food": {"type": "string", "description": "The food you believe you are confirming, as you named it in propose_food_estimate. Pass it whenever you know it: if it does not match what is actually pending, the call is refused instead of logging the wrong food."},
+                "expect_food": {"type": "string", "description": "REQUIRED. The food you believe you are confirming, as you named it in propose_food_estimate. A bare confirmation commits whatever happens to be pending, which has repeatedly logged a food the user never approved; naming it means a mismatch is refused instead."},
             },
-            "required": [],
+            "required": ["expect_food"],
         },
     },
     {
@@ -974,5 +1212,8 @@ LOG_FEATURE = Feature(
     # targets.py renders these; the reply reproduces them. Declaring them here is what
     # makes that enforceable in the harness instead of only asked for in the prompt.
     verbatim_blocks=("progress_block", "suggestions_block"),
+    # What a line of those blocks looks like, so the harness can also catch a block the
+    # model typed out when NO tool returned one — the case verbatim_blocks cannot see.
+    block_signature=targets.BLOCK_LINE,
     system_context=log_system_context,
 )

@@ -8,6 +8,7 @@ import pytest
 from health.core import harness
 from health.core.contracts import NormalizedMessage
 from health.features import food
+from health.store import writer
 from health.store.connection import get_conn
 
 from conftest import DEFAULT_TS, rows, text_block, tool_block
@@ -109,11 +110,42 @@ def test_accumulate_same_slug_in_one_call(ctx, catalog):
 
 
 def test_relog_adds_a_second_row(ctx, catalog):
+    """A real second helping still ADDS — that is why food_log's key carries ingested_at.
+    It has to say so now, because an unflagged immediate repeat is the confirm-turn bug."""
     ctx()
     _log("banana", 1, "each", meal="snack")
-    out = _log("banana", 1, "each", meal="snack")              # advancing clock -> distinct ingested_at
+    out = _log("banana", 1, "each", meal="snack", allow_duplicate=True)
     assert len(rows(get_conn(), "SELECT * FROM food_log")) == 2
     assert out["day_totals"]["kcal"] == pytest.approx(216.0)   # both helpings counted
+
+
+def test_an_immediate_identical_relog_is_skipped_and_reported(ctx, catalog):
+    ctx()
+    _log("banana", 1, "each", meal="snack")
+    out = _log("banana", 1, "each", meal="snack")              # the confirm turn, restating
+    assert len(rows(get_conn(), "SELECT * FROM food_log")) == 1
+    assert out["logged"] == []
+    (skipped,) = out["duplicate_skipped"]
+    assert skipped["food_name"] == "banana" and skipped["seconds_ago"] <= 2
+    assert out["day_totals"]["kcal"] == pytest.approx(108.0)   # counted once
+
+
+def test_the_same_food_in_a_different_meal_is_never_a_duplicate(ctx, catalog):
+    ctx()
+    _log("banana", 1, "each", meal="dinner")
+    out = _log("banana", 1, "each", meal="lunch")
+    assert len(rows(get_conn(), "SELECT * FROM food_log")) == 2
+    assert out["duplicate_skipped"] == []
+
+
+def test_a_repeat_outside_the_window_is_never_a_duplicate(ctx, catalog, monkeypatch):
+    ctx()
+    _log("banana", 1, "each", meal="snack")
+    later = writer.now() + food._DUPLICATE_WINDOW + timedelta(seconds=1)
+    monkeypatch.setattr(writer, "now", lambda: later)
+    out = _log("banana", 1, "each", meal="snack")
+    assert len(rows(get_conn(), "SELECT * FROM food_log")) == 2
+    assert out["duplicate_skipped"] == []
 
 
 def test_repeated_meal_label_is_one_meal_not_numbered(ctx, catalog):
@@ -241,7 +273,7 @@ def test_log_food_supersedes_pending_estimate_for_same_food(ctx, catalog):
     }])
     assert "c1" not in food._pending
     with pytest.raises(ValueError, match="Nothing is pending"):
-        food.confirm_pending()
+        food.confirm_pending(expect_food="smoked salmon")
 
 
 _MINCE_ITEM = {
@@ -254,7 +286,7 @@ def test_confirm_pending_refused_in_proposing_turn(ctx):
     ctx(text="200g beef mince", reply_handle="c1")
     food.propose_food_estimate(DAY, "dinner", [_MINCE_ITEM])
     with pytest.raises(ValueError, match="CURRENT message"):
-        food.confirm_pending()
+        food.confirm_pending(expect_food="beef mince")
     assert rows(get_conn(), "SELECT * FROM food_log") == []
     assert food._pending["c1"]["rows"][0]["food_slug"] == "beef_mince"
 
@@ -263,7 +295,7 @@ def test_confirm_pending_commits_on_a_later_turn(ctx):
     ctx(text="200g beef mince", reply_handle="c1")
     food.propose_food_estimate(DAY, "dinner", [_MINCE_ITEM])
     ctx(text="yes", reply_handle="c1")                         # a NEW message, same chat
-    (logged,) = food.confirm_pending()["logged"]
+    (logged,) = food.confirm_pending(expect_food="beef mince")["logged"]
     assert logged["estimated"] == 1
     assert logged["raw"] == "200g beef mince"                  # provenance: the food message, not the "yes"
     assert "c1" not in food._pending
@@ -275,9 +307,9 @@ def test_harness_cannot_self_confirm_estimate(fake_client):
     fake_client.script(
         [tool_block("propose_food_estimate",
                     {"date": DAY, "meal": "dinner", "items": [_MINCE_ITEM]}, id="tu-1")],
-        [tool_block("confirm_pending", {}, id="tu-2")],        # same-turn self-confirm
+        [tool_block("confirm_pending", {"expect_food": "beef mince"}, id="tu-2")],   # same-turn
         [text_block("Estimated 344 kcal — confirm?")],
-        [tool_block("confirm_pending", {}, id="tu-3")],        # turn 2, after the user's "yes"
+        [tool_block("confirm_pending", {"expect_food": "beef mince"}, id="tu-3")],   # turn 2
         [text_block("Logged.")],
     )
     msg = NormalizedMessage(source="telegram", reply_handle="chat-1",
@@ -303,3 +335,82 @@ def test_log_food_keeps_unrelated_pending(ctx, catalog):
     ctx(text="1 banana", reply_handle="c1")
     _log("banana", 1, "each", meal="snack")                    # unrelated food mid-proposal
     assert food._pending["c1"]["rows"][0]["food_slug"] == "pizza_slice"
+
+
+# --- user-given macros: the basis must be stated ------------------------------------
+
+def test_per_item_macros_for_a_count_must_state_their_basis(ctx, catalog):
+    ctx(text="Latte x2\n83kcal")
+    with pytest.raises(ValueError, match="macros_ref_qty is required"):
+        _log("latte", 2, "each", meal="snack",
+             kcal=83, protein_g=4.1, carb_g=5.6, fat_g=4.9, fibre_g=0)
+
+
+def test_a_stated_per_item_basis_scales_to_the_count(ctx, catalog):
+    ctx(text="two lattes, 83 kcal each")
+    (logged,) = _log("latte", 2, "each", meal="snack", macros_ref_qty=1,
+                     kcal=83, protein_g=4.1, carb_g=5.6, fat_g=4.9, fibre_g=0)["logged"]
+    assert logged["kcal"] == pytest.approx(166.0)
+
+
+def test_a_single_item_needs_no_basis(ctx, catalog):
+    """Quantity 1 is the one case where per-one and per-all are the same number."""
+    ctx(text="a latte, 83 kcal")
+    (logged,) = _log("latte", 1, "each", meal="snack",
+                     kcal=83, protein_g=4.1, carb_g=5.6, fat_g=4.9, fibre_g=0)["logged"]
+    assert logged["kcal"] == pytest.approx(83.0)
+
+
+def test_partial_macros_are_refused_not_silently_replaced_by_the_catalog(ctx, catalog):
+    """`fibre_g` is not required by the schema, and `has_macros` demanded all five — so
+    four-of-five fell through to the catalog branch and logged STALE catalog macros,
+    discarding the label the user had just read out. No error, nothing in `unresolved`."""
+    ctx(text="250g skyr, the tub says 63 kcal per 100g")
+    with pytest.raises(ValueError, match="all-or-nothing"):
+        _log("skyr", 250, "g", meal="snack", macros_ref_qty=100,
+             kcal=63, protein_g=11, carb_g=4, fat_g=0.2)
+    assert rows(get_conn(), "SELECT * FROM food_log") == []
+
+
+def test_a_per_100g_basis_on_a_counted_food_is_refused(ctx, catalog):
+    """Per-100g macros pinned to an `each` item divide every serving by 100 — and with
+    `save` freeze "per 100 each" into the catalog, dividing every FUTURE log by 100 too."""
+    ctx(text="2 slices of rye, 250 kcal per 100g, save it")
+    with pytest.raises(ValueError, match="counted in `each`"):
+        _log("rye bread", 2, "each", macros_ref_qty=100, save=True,
+             kcal=250, protein_g=9, carb_g=45, fat_g=2, fibre_g=6)
+
+
+def test_a_zero_basis_is_refused_rather_than_treated_as_absent(ctx, catalog):
+    ctx(text="baked beans")
+    with pytest.raises(ValueError, match="must be positive"):
+        _log("baked beans", 200, "g", macros_ref_qty=0,
+             kcal=50, protein_g=2, carb_g=8, fat_g=0, fibre_g=2)
+
+
+# --- macros that don't add up -------------------------------------------------------
+
+def test_calories_that_contradict_their_macros_are_flagged_but_still_logged(ctx, catalog):
+    """Warn when per-portion calories and per-weight macros disagree."""
+    ctx(text="Lentil stew as dinner\n191kcal\n15.2g carbs\n6.1g protein")
+    out = _log("lentil stew", 185, "g", meal="dinner", macros_ref_qty=185,
+               kcal=191, protein_g=6.1, carb_g=15.2, fat_g=0, fibre_g=5)
+    assert len(out["logged"]) == 1                        # logged anyway
+    (flag,) = out["macro_check"]
+    assert flag["stated_kcal"] == 191 and flag["implied_by_macros_kcal"] == pytest.approx(95.2)
+
+
+def test_ordinary_foods_never_trip_the_macro_check(ctx, catalog):
+    ctx(text="220g skyr")
+    assert _log("skyr", 220, "g", meal="breakfast")["macro_check"] == []
+    assert _log("smoked salmon", 63, "g", meal="lunch", macros_ref_qty=100,
+                kcal=184, protein_g=23.3, carb_g=0, fat_g=9.9,
+                fibre_g=0)["macro_check"] == []
+
+
+def test_an_unknown_unit_is_refused_rather_than_passed_through(ctx, catalog):
+    """`tbsp` used to stay `tbsp`: it matches no catalog entry and, once saved, freezes a
+    reference portion nothing can scale."""
+    ctx(text="2 tbsp of skyr")
+    with pytest.raises(ValueError, match="not a unit"):
+        _log("skyr", 2, "tbsp")

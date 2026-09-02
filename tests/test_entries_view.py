@@ -153,7 +153,10 @@ def test_query_log_defaults_to_today(ctx, catalog):
 def test_query_log_limit_is_honoured_and_capped(ctx, catalog):
     ctx(text="lots of skyr")
     for _ in range(4):
-        food.log_food(DAY, "snack", [{"name": "skyr", "quantity": 40, "unit": "g"}])
+        # allow_duplicate: four identical rows seconds apart is precisely what the
+        # re-log guard exists to stop, so this fixture has to say it means them.
+        food.log_food(DAY, "snack", [{"name": "skyr", "quantity": 40, "unit": "g",
+                                      "allow_duplicate": True}])
 
     assert len(corrections.query_log("food_log", limit=2)["rows"]) == 2
     assert corrections.query_log("food_log", limit=2)["truncated"] is True

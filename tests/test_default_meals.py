@@ -103,4 +103,4 @@ def test_estimates_are_not_defaulted(ctx, staples):
         "name": "creatine", "quantity": 1, "unit": "each",
         "kcal": 0, "protein_g": 0, "carb_g": 0, "fat_g": 0, "fibre_g": 0}])
     ctx(text="yes", reply_handle="c1")
-    assert food.confirm_pending()["meal"] == "breakfast"
+    assert food.confirm_pending(expect_food="creatine")["meal"] == "breakfast"

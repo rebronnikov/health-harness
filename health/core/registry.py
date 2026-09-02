@@ -56,6 +56,19 @@ def verbatim_block_keys() -> frozenset[str]:
     return frozenset(k for f in FEATURES for k in f.verbatim_blocks)
 
 
+def block_signatures() -> list:
+    """Every feature's rendered-block line pattern.
+
+    Companion to `verbatim_block_keys`, and it covers the case that one cannot:
+    `verbatim_blocks` compares the reply against blocks a tool RETURNED, so when no tool
+    ran there is nothing to compare and the check is silently vacuous. A signature says
+    what a rendered line LOOKS like, so a reply that types one out unprompted is
+    catchable. The core still learns the shape from the declaration and never knows a
+    progress block is a food concept.
+    """
+    return [f.block_signature for f in FEATURES if f.block_signature is not None]
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     for f in FEATURES:
         if f.schema:

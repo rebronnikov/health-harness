@@ -23,3 +23,6 @@ dist/
 # Secrets / local config overrides
 config.local.toml
 .env
+
+# Publication working plan — quotes the personal-data inventory verbatim; never commit
+PUBLISHING_PLAN.md

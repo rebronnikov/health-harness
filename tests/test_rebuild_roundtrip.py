@@ -52,7 +52,8 @@ def _write_a_representative_mix(ctx):
     food.save_food("banana", 1, "each", 108, 1.44, 24.4, 0.12, 0)
     ctx(source="telegram", text="210g skyr")
     (first,) = food.log_food(DAY, "snack", [{"name": "skyr", "quantity": 210, "unit": "g"}])["logged"]
-    (second,) = food.log_food(DAY, "snack", [{"name": "skyr", "quantity": 210, "unit": "g"}])["logged"]
+    (second,) = food.log_food(DAY, "snack", [{"name": "skyr", "quantity": 210, "unit": "g",
+                                              "allow_duplicate": True}])["logged"]
 
     # --- corrections: an edit and a delete that must survive replay ---
     ctx(source="telegram", text="the first skyr was 105g")
