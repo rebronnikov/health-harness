@@ -20,6 +20,30 @@ load_dotenv(_REPO_ROOT / ".env")
 DATA_DIR = Path(os.environ.get("DATA_DIR", _REPO_ROOT / "data"))
 DB_PATH = Path(os.environ.get("DB_PATH", DATA_DIR / "health.sqlite"))
 
+# --- Daily targets ---
+# Example defaults for a moderately active adult on a high-protein plan; override
+# any of them with TARGET_KCAL / TARGET_PROTEIN_G / TARGET_FIBRE_G / TARGET_CARB_G /
+# TARGET_FAT_G in the environment (or `.env`). kcal and fat are ceilings, protein
+# and fibre are floors, carbs are tracked — that semantics lives in
+# `features/targets.py`; only the numbers live here, because this is already the
+# one module that reads the environment.
+#
+# Why env-with-defaults rather than a targets.toml: five integers that never change
+# at runtime don't justify a parser, a missing-file branch and a second config
+# surface. If a sixth setting ever needs structure, that is the moment to add a file.
+DEFAULT_TARGETS = {"kcal": 2200, "protein_g": 150, "fibre_g": 28, "carb_g": 250, "fat_g": 70}
+
+
+def _targets() -> dict[str, int]:
+    out = {}
+    for key, default in DEFAULT_TARGETS.items():
+        raw = os.environ.get(f"TARGET_{key.upper()}")
+        out[key] = int(raw) if raw else default
+    return out
+
+
+TARGETS = _targets()
+
 # --- Model + provenance versions ---
 # claude-sonnet-4-6 is the current Sonnet id; the chassis doc's
 # claude-sonnet-4-20250514 is the deprecated Sonnet 4 (retiring 2026-06-15).

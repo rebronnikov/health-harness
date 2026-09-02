@@ -25,6 +25,15 @@ def test_per_test_writes_target_a_tmp_dir(tmp_path):
     assert REAL_DATA_DIR not in writer.DATA_DIR.parents
 
 
+def test_targets_are_the_shipped_defaults():
+    """conftest clears TARGET_* before the first import, so the suite always runs
+    against DEFAULT_TARGETS — a developer's `.env` override must not be able to
+    rewrite the progress-block assertions in other test modules."""
+    from health.features import targets
+    assert config.TARGETS == config.DEFAULT_TARGETS
+    assert targets.TARGETS is config.TARGETS
+
+
 def test_live_connection_file_is_under_tmp(tmp_path):
     files = [r[2] for r in get_conn().execute("PRAGMA database_list")]  # (seq, name, file)
     main_db = Path(files[0])

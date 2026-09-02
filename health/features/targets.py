@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import re
 
-# --- Targets (the owner's aligned daily numbers) ---------------------------------
-# kcal and fat are CEILINGS (stay under); protein & fibre are FLOORS (hit at least);
-# carbs are TRACKED (show progress toward the number, no floor/ceiling).
-# Change a number here + `./scripts/bot.sh restart`.
-TARGETS = {"kcal": 2200, "protein_g": 150, "fibre_g": 28, "carb_g": 250, "fat_g": 70}
+from health.config import TARGETS  # noqa: F401  (re-exported: callers read targets.TARGETS)
+
+# --- Targets ---------------------------------------------------------------------
+# The numbers live in `health.config` (DEFAULT_TARGETS, overridable per key with
+# TARGET_* env vars), so this module has no environment to read and stays pure.
+# The semantics are fixed here: kcal and fat are CEILINGS (stay under); protein and
+# fibre are FLOORS (hit at least); carbs are TRACKED (progress toward the number,
+# no floor/ceiling). Changing a number means editing `.env` + restarting the bot.
 
 # --- Suggestion tuning (first-pass heuristics; refine in use) ------------------
 SUGGEST_AFTER_HOUR = 16     # local hour; evening "what to eat" suggestions start at/after 16:00
