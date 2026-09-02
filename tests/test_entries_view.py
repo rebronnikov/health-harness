@@ -5,7 +5,7 @@ from datetime import timedelta
 
 import pytest
 
-from health.adapters import telegram_adapter as tg
+from health.adapters import entries_view as tg
 from health.core.contracts import NormalizedMessage
 from health.features import corrections, exercise, food, steps, weight
 from health.store.connection import get_conn
