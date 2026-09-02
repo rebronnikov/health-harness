@@ -1,6 +1,6 @@
 """Shared fixtures + the test-isolation harness.
 
-THE LOAD-BEARING BIT (read `plan`/CLAUDE.md before touching): `DATA_DIR` and
+THE LOAD-BEARING BIT (read CLAUDE.md before touching): `DATA_DIR` and
 `DB_PATH` are resolved at import time and copied by value into four modules
 (`config`, `writer`, `connection`, `rebuild_db`). Setting DATA_DIR/DB_PATH in the
 environment BELOW must happen before the first `health` import, so every one of

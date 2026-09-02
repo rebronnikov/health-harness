@@ -49,8 +49,8 @@ def test_same_turn_confirm_still_refused_when_the_previous_reply_did_not(ctx):
 
 def test_every_item_must_have_been_shown(ctx):
     """One recognisable figure can't wave a multi-item proposal through."""
-    first = ctx(text="a salad and a roll", reply_handle="c1")
-    history.save(first, "The salad is about 104 kcal.")   # the roll's 250 was never shown
+    first = ctx(text="a salad and a toastie", reply_handle="c1")
+    history.save(first, "The salad is about 104 kcal.")   # the toastie's 250 was never shown
 
     ctx(text="yes", reply_handle="c1")
     food.propose_food_estimate(DAY, "lunch", SALAD + [
@@ -162,7 +162,7 @@ def test_a_generic_word_alone_never_matches(ctx):
         "name": "Beetroot & Carrot Salad with Orange Dressing", "quantity": 60, "unit": "g",
         "kcal": 48, "protein_g": 0.6, "carb_g": 4.8, "fat_g": 3, "fibre_g": 1.2}])
     ctx(text="yes log it", reply_handle="c1")
-    with pytest.raises(ValueError, match="Beetroot salad"):
+    with pytest.raises(ValueError, match="Beetroot"):
         food.confirm_pending(expect_food="pear rocket salad")
     assert rows(get_conn(), "SELECT * FROM food_log") == []
 

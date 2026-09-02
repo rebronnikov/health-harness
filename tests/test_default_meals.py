@@ -15,7 +15,7 @@ def staples(ctx):
     ctx(text="seed")
     food.save_food("creatine", 1, "each", 0, 0, 0, 0, 0)
     food.save_food("psyllium husk", 8, "g", 0, 0, 0, 0, 7)
-    food.save_food("protein bar", 1, "each", 118, 2.1, 11.4, 7.3, 0.3)
+    food.save_food("protein bar", 1, "each", 214, 20, 18, 7.5, 4)
     food.save_food("jumbo oats", 40, "g", 148, 5.2, 24, 3.4, 3.6)   # no default meal
 
 
@@ -39,6 +39,7 @@ def test_the_default_outranks_a_named_meal(ctx, staples):
 
 
 def test_one_message_can_write_two_meals(ctx, staples):
+    """The usual breakfast message shape: the meal is named, and supplements are in the list."""
     ctx()
     out = food.log_food(DAY, "breakfast", [
         {"name": "jumbo oats", "quantity": 50, "unit": "g"},
@@ -80,7 +81,7 @@ def test_a_mixed_message_asks_only_about_the_unlabelled_row(ctx, staples):
 
 def test_every_default_key_is_a_real_slug():
     """The guardrail. A renamed or mistyped name doesn't error — it just stops matching and
-    falls through to the old behaviour, which is invisible until the owner notices the question
+    falls through to the old behaviour, which is invisible until the user notices the question
     came back. These are the catalog's own display names, so they must round-trip."""
     for name, expected in [
         ("psyllium husk", "supplements"),

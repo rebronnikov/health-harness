@@ -78,7 +78,7 @@ def test_a_container_backed_turn_carries_its_container_id(fake_client):
         [text_block("~188 kcal for 150g.")],
     )
 
-    reply = harness.handle(_msg("150g beef mince, look up Waitrose"))
+    reply = harness.handle(_msg("150g beef mince, look it up"))
 
     assert reply == "~188 kcal for 150g."
     # The search's own request can't know the id yet; every request after it must.

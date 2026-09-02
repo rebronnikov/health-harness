@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Template for the per-user LaunchAgent. `scripts/bot.sh install` renders it:
+  launchd requires absolute paths and cannot expand $HOME or ~, so the install
+  step substitutes this checkout's paths for the __LABEL__ / __REPO__ / __PYTHON__
+  placeholders and copies the result to ~/Library/LaunchAgents/. Never load this
+  file directly.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>__LABEL__</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON__</string>
+        <string>-m</string>
+        <string>health.main</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Relaunch after a crash, never after a clean exit: `launchctl bootout` stays
+         stopped, which is what rebuild_db's "stop the bot first" step relies on. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>Crashed</key>
+        <true/>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- stderr carries all application logging (see health/main.py); stdout is
+         normally empty. -->
+    <key>StandardOutPath</key>
+    <string>__REPO__/data/logs/bot.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__REPO__/data/logs/bot.err.log</string>
+</dict>
+</plist>

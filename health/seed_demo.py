@@ -60,7 +60,7 @@ SESSIONS = (
      {"exercise": "pull-ups", "sets": 4, "reps": 8},
      {"exercise": "plank", "sets": 3, "duration_min": 1}],
     [{"exercise": "squat", "sets": 4, "reps": 6, "weight_kg": 80, "rpe": 8},
-     {"exercise": "romanian deadlift", "sets": 3, "reps": 10, "weight_kg": 60}],
+     {"exercise": "deadlift", "sets": 3, "reps": 10, "weight_kg": 60}],
 )
 
 

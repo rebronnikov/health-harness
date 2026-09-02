@@ -87,7 +87,7 @@ BODY = (
         "americano is zero, an iced cappuccino is not. "
         "(2) IS IT IN SAVED FOODS? If so use the stored macros and log it. They are the "
         "user's own numbers — never re-check them against the web. "
-        "(3) IS A BRAND, CHAIN OR VENUE NAMED? ('iced cappuccino Pret', 'Huel bar', "
+        "(3) IS A BRAND, CHAIN OR VENUE NAMED? ('Pret iced cappuccino', 'Huel bar', "
         "'Pret chicken salad'.) Then web_search that producer's OWN site first and "
         "web_fetch the page to read the real table — they are the only source with THEIR "
         "recipe, and no grocer lists it. A named producer is exactly the case worth a "

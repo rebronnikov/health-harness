@@ -105,7 +105,7 @@ def test_a_stated_assumption_closes_the_question():
 
 def test_the_estimate_must_be_staged_before_it_is_shown():
     """The 2026-08 confirmation loop: the model wrote estimates as prose and only called
-    propose_food_estimate after the owner had already said yes, so his "yes" landed on an empty
+    propose_food_estimate after the user had already said yes, so their "yes" landed on an empty
     slot and cost him a second (sometimes third) confirmation. The rule used to be one
     sentence buried between BIAS TO ACT and the macros ladder; it is now its own section,
     and it must keep saying which comes first."""

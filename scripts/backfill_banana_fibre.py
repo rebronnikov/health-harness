@@ -1,6 +1,6 @@
 """One-off: give already-logged banana rows the fibre the catalog never had.
 
-`food_catalog.banana` was seeded with `fibre_g = 0` because the Waitrose label omits
+`food_catalog.banana` was seeded with `fibre_g = 0` because the retailer's label omits
 fibre. Every row logged from it copied that zero forward, so a food that carries ~1.4g
 fibre per 100g contributed nothing to a target that is a FLOOR. Fixing the catalog only
 helps future logs; this repairs the history.
@@ -36,7 +36,7 @@ SLUG = "banana"
 FIBRE_PER_UNIT = 1.68        # 1.4g/100g * 120g peeled — same derivation as the other macros
 
 REASON = (
-    "backfill: banana fibre was seeded as 0 because the Waitrose label omits it; "
+    "backfill: banana fibre was seeded as 0 because the retailer's label omits it; "
     "1.4g/100g (another UK retailer's panel + McCance & Widdowson 2015) = "
     f"{FIBRE_PER_UNIT}g per banana"
 )

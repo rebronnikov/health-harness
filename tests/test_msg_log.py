@@ -91,7 +91,7 @@ def test_a_web_lookup_records_the_query_and_the_pages(ctx, fake_client, tmp_path
         [raw_block("server_tool_use", id="srv-1", name="web_search",
                    input={"query": "pret iced cappuccino nutrition"}),
          raw_block("web_search_tool_result", tool_use_id="srv-1",
-                   content=[_search_result("Pret — Menu", "https://pret.com/menu")]),
+                   content=[_search_result("Pret — Menu", "https://www.pret.co.uk/menu")]),
          text_block("Per the Pret site: 140 kcal.")],
     )
     harness.handle(_msg("iced cappuccino pret"))
@@ -104,7 +104,7 @@ def test_a_web_lookup_records_the_query_and_the_pages(ctx, fake_client, tmp_path
     assert result["tool"] == "web_search_tool_result"
     assert result["id"] == call["id"] == "srv-1"        # the pair is joined by tool_use_id
     assert result["result"] == [{"title": "Pret — Menu",
-                                 "url": "https://pret.com/menu"}]
+                                 "url": "https://www.pret.co.uk/menu"}]
 
 
 def test_a_lookup_records_what_it_read_not_what_it_downloaded(ctx, fake_client, tmp_path):

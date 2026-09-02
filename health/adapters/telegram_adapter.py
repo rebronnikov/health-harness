@@ -60,7 +60,7 @@ async def _on_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         # Never leave the user hanging on a pipeline failure (billing, rate limit,
         # network). Nothing was written, so resending after the cause is fixed is
-        # safe. Only the owner's chat reaches here, so showing the raw reason is fine.
+        # safe. Only the allowlisted chat reaches here, so showing the raw reason is fine.
         log.exception("harness.handle failed")
         detail = str(e)
         if len(detail) > 250:
@@ -166,7 +166,7 @@ async def _on_catalog(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         for text in messages:
             await ctx.bot.send_message(chat_id=chat.id, text=text, parse_mode=ParseMode.HTML)
     except Exception as e:
-        # Mirror _on_message: never leave the user hanging; only the owner's chat reaches here.
+        # Mirror _on_message: never leave the user hanging; only the allowlisted chat reaches here.
         log.exception("/catalog failed")
         detail = str(e)
         if len(detail) > 250:

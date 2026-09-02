@@ -15,7 +15,7 @@ Claude): Claude maps language -> (food, quantity, unit) and, for unknown foods,
 Estimates are gated: a food whose MACROS we have to estimate is NOT written on the spot.
 It is stashed in an ephemeral per-chat pending slot and only committed once the user has
 SEEN the numbers and agreed to them. That is the actual rule; "not from the proposing
-message" is only the usual way to check it, and checking it that way alone cost the owner an
+message" is only the usual way to check it, and checking it that way alone cost the user an
 extra confirmation on most estimates through 2026-08 — the model kept showing an estimate
 as prose and calling propose_food_estimate only after he had already said yes, so the
 refusal fired on a proposal he had plainly seen. confirm_pending now reads the previous
@@ -222,7 +222,7 @@ def normalise_meal(meal: str | None) -> str:
     This used to number repeats — two `breakfast` messages became `breakfast-1` and
     `breakfast-2`. That was backwards: a meal is often logged across several messages
     (the oats, then the coffee ten minutes later), and numbering split one sitting into
-    two while offering no way to merge them back. the owner delimits his own meals now; a
+    two while offering no way to merge them back. The user delimits their own meals now; a
     genuine second sitting is whatever he types ("second breakfast"), which passes
     through untouched. An absent label becomes `unlabelled` — a state the bot asks about
     and `set_meal` resolves — rather than being silently guessed at from the clock.
@@ -231,7 +231,7 @@ def normalise_meal(meal: str | None) -> str:
 
 
 # Foods that always carry their own meal label. Keyed by display name and slugged through
-# the same `_slug` the log path uses, so this reads like the catalog listing the owner sees and
+# the same `_slug` the log path uses, so this reads like the catalog listing the user sees and
 # cannot drift from how names are keyed. A name that stops matching the catalog would just
 # fall through to the old behaviour — silently — which is what the round-trip test guards.
 DEFAULT_MEALS = {_slug(name): normalise_meal(meal) for name, meal in {
@@ -248,7 +248,7 @@ def _resolve_meal(slug: str, meal: str | None) -> str:
     """The meal one logged food lands under.
 
     A food in DEFAULT_MEALS takes its own label and **outranks a meal named in the message**,
-    which is the surprising half and is deliberate. A breakfast message can contain supplements and meal items. One call can therefore write two meals, and both `log_food`'s return and the MEAL prompt rule are shaped for it.
+    which is the surprising half and is deliberate. A message can contain both meal items and supplements, so one write may span two meals. Both `log_food`'s return and the MEAL prompt rule are shaped for it.
 
     Anything else keeps the old behaviour: the named meal, or `unlabelled` and a question.
     """
