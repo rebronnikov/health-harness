@@ -101,6 +101,10 @@ Conversation history then fed the drift back into later turns. So a feature decl
 | A confirmation re-sends an earlier item | Check for a recent duplicate before writing | `test_food_log.py` |
 | A serving's calories and macros use different reference amounts | Compare calories with the macros and surface a warning | `test_food_log.py` |
 
+## Removing saved foods
+
+Send a request such as “remove Orchard Oat Bites from my catalog.” If several names match, the bot asks you to choose. The removal survives a database rebuild, and past meals stay in your food log.
+
 ## Running it for real
 
 ```bash

@@ -122,7 +122,7 @@ def _norm_unit(unit: str) -> str:
 
 def _lookup_catalog(conn: sqlite3.Connection, slug: str) -> dict | None:
     row = conn.execute(
-        "SELECT slug, name, ref_qty, ref_unit, kcal, protein_g, carb_g, fat_g, fibre_g "
+        "SELECT slug, name, ref_qty, ref_unit, kcal, protein_g, carb_g, fat_g, fibre_g, ingested_at "
         "FROM food_catalog WHERE slug = ?",
         (slug,),
     ).fetchone()
@@ -305,6 +305,35 @@ def save_food(name: str, ref_qty: float, ref_unit: str, kcal: float,
                           notes=notes)
     _clear_offer(_slug(name))            # the standing "want to save this?" is answered
     return {"saved": saved}
+
+
+def remove_catalog_food(name: str) -> dict:
+    """Remove the current version of one exact saved food."""
+    slug = _slug(name)
+    if not slug:
+        raise ValueError("Pass the name of a saved food to remove.")
+
+    def require_food(conn: sqlite3.Connection) -> dict:
+        row = _lookup_catalog(conn, slug)
+        if row is None:
+            raise ValueError(f"No saved food named {name!r} in the catalog.")
+        return row
+
+    target = require_food(get_conn())
+
+    def check_version(conn: sqlite3.Connection) -> None:
+        if require_food(conn)["ingested_at"] != target["ingested_at"]:
+            raise ValueError(f"{target['name']!r} was updated during removal. Ask the user to retry.")
+
+    writer.record("corrections", {
+        "action": "delete",
+        "target_domain": "food_catalog",
+        "target_key": {"slug": slug},
+        "target_ingested_at": target["ingested_at"],
+        "changes": None,
+    }, precondition=check_version)
+    _clear_offer(slug)
+    return {"removed": {"name": target["name"], "slug": slug}}
 
 
 def _unresolved_reason(cat: sqlite3.Row | None, unit: str) -> str:
@@ -977,12 +1006,7 @@ def log_system_context(msg) -> str | None:
 
 
 def catalog_system_context(msg) -> str | None:
-    """List the user's saved foods so Claude logs them by their EXACT catalog name
-    (and a compatible unit) instead of estimating. Without this, Claude can't know
-    "cheddar" means the saved "cheddar cheese", and a near-miss name falls straight
-    through to an estimate. An ambiguous mention is resolved by PROPOSING a reading the
-    user can correct, never by asking: a question spends a round-trip and its answer
-    lands on a turn that has no memory of what was asked.
+    """List saved foods by exact catalog name for logging and catalog removal.
     Rebuilt from the catalog every turn — cheap at personal-catalog scale."""
     rows = get_conn().execute(
         "SELECT name, ref_qty, ref_unit FROM food_catalog ORDER BY name"
@@ -992,7 +1016,7 @@ def catalog_system_context(msg) -> str | None:
     lines = "\n".join(f"- {r['name']} — per {r['ref_qty']:g} {r['ref_unit']}" for r in rows)
     return (
         "SAVED FOODS (the user's catalog — macros are stored for each). When the user "
-        "mentions one, even loosely (e.g. 'cheddar' -> 'cheddar cheese', 'a slice of "
+        "says they ate one, even loosely (e.g. 'cheddar' -> 'cheddar cheese', 'a slice of "
         "sourdough' -> 'sourdough', '1 can tuna' -> 'tuna'), log it with log_food using "
         "its EXACT name below and a unit compatible with how it's measured, so the stored "
         "macros are used instead of estimating. If a mention could match more than one of "
@@ -1026,6 +1050,21 @@ CATALOG_TOOLS = [{
             "notes": {"type": "string", "description": "Optional free-text detail worth remembering for later analysis: composition (e.g. which nuts in 'mixed nuts'), brand, or prep (e.g. 'in brine, drained'). Omit if none."},
         },
         "required": ["name", "ref_qty", "ref_unit", "kcal", "protein_g", "carb_g", "fat_g", "fibre_g"],
+    },
+}, {
+    "name": "remove_catalog_food",
+    "description": (
+        "Remove one reusable food from the user's saved catalog. Use when the user asks "
+        "to remove a saved food and has identified one entry. Pass its exact name from "
+        "SAVED FOODS. This only applies to the catalog. The result gives the name removed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "The exact display name from SAVED FOODS."},
+        },
+        "required": ["name"],
+        "additionalProperties": False,
     },
 }]
 
@@ -1187,7 +1226,7 @@ LOG_TOOLS = [
 CATALOG_FEATURE = Feature(
     name="food_catalog",
     tools=CATALOG_TOOLS,
-    executors={"save_food": save_food},
+    executors={"save_food": save_food, "remove_catalog_food": remove_catalog_food},
     schema=CATALOG_SCHEMA,
     domain="food_catalog",
     dedupe_key=("slug",),

@@ -36,7 +36,7 @@ from datetime import timedelta
 from typing import Any
 
 from health.core.contracts import Feature, get_context
-from health.features.food import UNLABELLED_MEAL, get_day_totals, normalise_meal
+from health.features.food import CATALOG_FEATURE, UNLABELLED_MEAL, get_day_totals, normalise_meal
 from health.store import writer
 from health.store.connection import get_conn
 
@@ -78,9 +78,7 @@ def _targetable() -> dict[str, Feature]:
 
     The test is a `date` in the dedupe key, i.e. "this is a dated log". That admits
     steps/weight/measurements/food_log and any dated feature added later, and excludes
-    `food_catalog` (a lookup table, not a log: nothing to query by date, and the way to
-    change an entry is to save_food over it, which upserts on slug and keeps provenance
-    consistent) and this feature itself.
+    `food_catalog`, which has dedicated save and removal tools, and this feature itself.
     """
     from health.core.registry import ingesting_features   # lazy: avoids the import cycle
 
@@ -92,7 +90,7 @@ def _feature(domain: str) -> Feature:
     if domain not in targetable:
         raise ValueError(
             f"{domain!r} can't be corrected. Correctable domains: {sorted(targetable)}. "
-            "To change a saved food use save_food, which overwrites it by name."
+            "For saved foods use save_food or remove_catalog_food."
         )
     return targetable[domain]
 
@@ -405,7 +403,11 @@ def project(conn: sqlite3.Connection, row: dict) -> None:
         _project_relabel(conn, row)
         return
 
-    feature = _feature(row["target_domain"])
+    domain = row["target_domain"]
+    if action == "delete" and domain == CATALOG_FEATURE.domain:
+        feature = CATALOG_FEATURE
+    else:
+        feature = _feature(domain)
     where, params = _match(feature, dict(row["target_key"]), row["target_ingested_at"])
 
     if action == "delete":

@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import threading
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 from health.config import DATA_DIR, MODEL_VERSION, PARSER_VERSION
@@ -33,7 +35,8 @@ def now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def record(domain: str, fields: dict, raw: str | None = None) -> dict:
+def record(domain: str, fields: dict, raw: str | None = None, *,
+           precondition: Callable[[sqlite3.Connection], None] | None = None) -> dict:
     """Append one canonical row to data/<domain>.jsonl, upsert it into the SQLite
     projection, and log provenance. Returns the stored row for the executor to echo.
 
@@ -45,6 +48,9 @@ def record(domain: str, fields: dict, raw: str | None = None) -> dict:
     DIFFERENT runtime-captured message (e.g. a deferred-commit flow where the food
     estimate was proposed on an earlier turn and committed on the user's "yes"). It is
     still runtime-supplied, never model-authored, so the provenance invariant holds.
+
+    A precondition can raise before any append. It runs under the writer lock and
+    a SQLite write transaction so the checked row cannot change before projection.
     """
     from health.core.registry import feature_by_domain  # lazy: avoid import cycle
 
@@ -61,10 +67,12 @@ def record(domain: str, fields: dict, raw: str | None = None) -> dict:
     dedupe = feature.dedupe_value(row)
     raw_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    with _lock:
+    with _lock, get_conn() as conn:
+        if precondition is not None:
+            conn.execute("BEGIN IMMEDIATE")
+            precondition(conn)
         _append_jsonl(DATA_DIR / f"{domain}.jsonl", row)          # 1. system of record (first)
-        conn = get_conn()
-        feature.project(conn, row)                                # 2. projection upsert (idempotent)
+        feature.project(conn, row)                              # 2. projection (idempotent)
         _append_jsonl(DATA_DIR / "ingest_log.jsonl", {            # 3. provenance sidecar (audit)
             "raw_hash": raw_hash,
             "domain": domain,
@@ -73,7 +81,6 @@ def record(domain: str, fields: dict, raw: str | None = None) -> dict:
             "model_version": MODEL_VERSION,
             "ingested_at": row["ingested_at"],
         })
-        conn.commit()
     return row
 
 

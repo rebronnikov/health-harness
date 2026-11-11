@@ -245,10 +245,11 @@ def test_mismatched_key_raises(ctx, catalog):
         corrections.edit_entry("food_log", {"date": DAY}, at, {"amount": 50})
 
 
-def test_food_catalog_is_not_correctable(ctx, catalog):
-    """It's a lookup table, not a log — save_food overwrites an entry by name."""
+def test_catalog_changes_use_dedicated_tools(ctx, catalog):
     with pytest.raises(ValueError, match="save_food"):
         corrections.query_log("food_catalog", DAY, DAY)
+    with pytest.raises(ValueError, match="remove_catalog_food"):
+        corrections.delete_entry("food_catalog", {"slug": "skyr"}, "unused")
 
 
 # --- query_log --------------------------------------------------------------
